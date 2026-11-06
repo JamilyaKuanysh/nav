@@ -177,7 +177,7 @@
 const ALMATY = [43.238, 76.945];
 const VIEWBOX = "76.70,43.42,77.20,43.03";
 const VALHALLA = "https://valhalla1.openstreetmap.de/route";
-const MODELS = ["gemini-flash-latest", "gemini-3.6-flash"];
+const MODELS = ["gemini-flash-latest", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash-lite"];
 
 const SYSTEM = `Ты голосовой помощник навигатора в Алматы (Казахстан). Водитель говорит по-русски (иногда с казахскими названиями). Твоя задача - понять, что изменить в маршруте, и вернуть JSON.
 
@@ -574,23 +574,35 @@ async function askGemini(parts) {
     contents: [{ role: "user", parts: [{ text: "Контекст поездки: " + JSON.stringify(context) }, ...parts] }],
     generationConfig: { responseMimeType: "application/json", responseSchema: SCHEMA, temperature: 0.2 }
   });
-  for (let i = 0; i < MODELS.length; i++) {
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODELS[i]}:generateContent`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-      body
-    });
-    if (res.status === 404 && i < MODELS.length - 1) continue;
-    if (!res.ok) {
-      const err = await res.text();
-      if (res.status === 429) throw new Error("Бесплатный лимит Gemini на минуту исчерпан - подождите немного.");
-      if (res.status === 403 || (res.status === 400 && /API key/i.test(err))) throw new Error("Ключ Gemini не подошёл - проверьте его в настройках.");
-      throw new Error("Ошибка Gemini " + res.status);
+  // при перегрузке (503) или лимите (429) пробуем другую модель - у каждой свой бесплатный лимит;
+  // начинаем с той, что сработала в прошлый раз
+  const last = store.get("model", MODELS[0]);
+  const order = [last, ...MODELS.filter(m => m !== last)];
+  let busy = false, limited = false;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt) await new Promise(r => setTimeout(r, 2500));
+    for (const model of order) {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+        body
+      });
+      if (res.status === 404 || res.status >= 500) { busy = busy || res.status >= 500; continue; }
+      if (res.status === 429) { limited = true; continue; }
+      if (!res.ok) {
+        const err = await res.text();
+        if (res.status === 403 || (res.status === 400 && /API key/i.test(err))) throw new Error("Ключ Gemini не подошёл - проверьте его в настройках.");
+        throw new Error("Ошибка Gemini " + res.status);
+      }
+      const data = await res.json();
+      const text = (data.candidates?.[0]?.content?.parts || []).filter(p => !p.thought).map(p => p.text || "").join("");
+      if (!text) continue;
+      store.set("model", model);
+      return JSON.parse(text);
     }
-    const data = await res.json();
-    const text = (data.candidates?.[0]?.content?.parts || []).filter(p => !p.thought).map(p => p.text || "").join("");
-    return JSON.parse(text);
   }
+  if (limited && !busy) throw new Error("Бесплатный лимит Gemini на сегодня исчерпан. Попробуйте позже или завтра.");
+  throw new Error("Серверы Gemini сейчас перегружены - попробуйте через минуту.");
 }
 
 const newId = () => Math.random().toString(36).slice(2, 9);
