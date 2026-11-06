@@ -169,6 +169,7 @@
     <li>«Садик International Bright School на Розы Жамановой 102» - место запомнится, потом хватит «в садик»</li>
     <li>«Объедь Абая» / «Абая у Байтурсынова ремонт, объедь»</li>
     <li>«Впереди ремонт» / «Тут ямы, объедь»</li>
+    <li>«Не Верный, а Горный» - поправить место, если навигатор понял не то</li>
     <li>«Предложи другой вариант»</li>
     <li>«Всегда объезжай Аль-Фараби» - правило запомнится</li>
     <li>«Забудь про Аль-Фараби» / «Сбрось все правила»</li>
@@ -203,7 +204,7 @@ const SYSTEM = `Ты голосовой помощник навигатора в
 Места (destination, stops, origin) - объекты {name, address}:
   name - название места как его пишут (бренды латиницей: "Mega Park", "International Bright School"; кафе - как называется: "Форт Верный"). Для чистого адреса name = адрес.
   address - адрес, только если водитель его назвал: "улица Розы Жамановой 102". Иначе "".
-  Если место есть в known_places (водитель говорит "садик", "дом", "работа" или похожее название) - возьми name точно как в списке.
+  Если место есть в known_places (водитель говорит "садик", "дом", "работа" или похоже звучащее название) - возьми name точно как в списке. Похожие на слух названия ("Форт Горный" / "Форт Верный") - выбирай то, что есть в known_places.
   Названия улиц Алматы пиши правильно и полностью, даже если водитель сказал неточно: "Ракеша 25А" -> "улица Данеш Ракишева 25А", "Абая" -> "проспект Абая".
 - destination: конечная точка поездки. {name:"", address:""}, если не названа.
 - stops: места, куда надо заехать ДО конечной точки, по порядку ("сначала в садик, потом в кафе" -> stops=[садик], destination=кафе). Пустой массив, если остановок нет.
@@ -219,6 +220,7 @@ const SYSTEM = `Ты голосовой помощник навигатора в
 - remove: названия улиц/правил, которые надо убрать (для remove_rule).
 - reply_ru: одно короткое предложение-подтверждение, на "Вы", без лишних слов. Например "Объезжаю Абая, маршрут через Сатпаева."
 
+Если водитель поправляет место ("не Верный, а Горный", "я имела в виду другой садик") - intent "change" и верни ПОЛНЫЙ исправленный список: stops (все остановки по порядку) и destination, как они должны быть теперь. Если он ничего не поправляет в местах - stops пустой, destination пустой.
 Если часть просьбы непонятна (например "по той улице, которая потом" без названия) - выполни то, что понятно, а в reply_ru коротко спроси уточнение: "Какую улицу Вы имеете в виду?". Если непонятно ничего - intent "other" и вопрос в reply_ru.
 Учитывай контекст текущей поездки, который придёт в сообщении.`;
 
@@ -825,8 +827,22 @@ async function applyCommand(c) {
       alt: 0,
       handedOff: false
     };
-  } else if ((c.destination?.name || c.destination?.address) && trip) {
-    trip.dest = await findPlace(c.destination);
+  } else if (trip) {
+    // поправка мест в текущей поездке: «не Верный, а Горный»; ошибочное место забываем
+    const before = [trip.origin, ...(trip.stops || []), trip.dest].filter(Boolean).map(pl => pl.name);
+    if (c.stops?.length) {
+      const stops = [];
+      for (const st of c.stops) stops.push(await findPlace(st));
+      trip.stops = stops;
+    }
+    if (c.destination?.name || c.destination?.address) trip.dest = await findPlace(c.destination);
+    if (c.origin?.name || c.origin?.address) trip.origin = await findPlace(c.origin);
+    const after = [trip.origin, ...(trip.stops || []), trip.dest].filter(Boolean).map(pl => pl.name);
+    const wrong = before.filter(n => !after.includes(n));
+    if (wrong.length) {
+      places = places.filter(pl => !wrong.includes(pl.name));
+      store.set("nav_places", places);
+    }
   }
   if (c.intent === "alternative" && trip) trip.alt = (trip.alt || 0) + 1;
 
@@ -871,6 +887,7 @@ async function applyCommand(c) {
     rules.push({ id: newId(), kind: "unpaved", label: "без грунтовок", permanent });
   }
 
+  for (const pl of [trip?.origin, ...(trip?.stops || []), trip?.dest]) if (pl && !pl.approx) rememberPlace(pl);
   const wasDriving = trip?.handedOff;
   note("");
   await rebuild();
