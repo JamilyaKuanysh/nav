@@ -165,13 +165,16 @@
     <li>«До Мега Парка через Сатпаева»</li>
     <li>«Сначала в школу на Тимирязева, потом в Форт Горный»</li>
     <li>«Только не через дворы и узкие улицы»</li>
-    <li>«От дома на Абая 10 до аэропорта» - если не из текущего места</li>
+    <li>«От Ракишева 25А до аэропорта» - если не из текущего места</li>
+    <li>«Садик International Bright School на Розы Жамановой 102» - место запомнится, потом хватит «в садик»</li>
     <li>«Объедь Абая» / «Абая у Байтурсынова ремонт, объедь»</li>
     <li>«Впереди ремонт» / «Тут ямы, объедь»</li>
     <li>«Предложи другой вариант»</li>
     <li>«Всегда объезжай Аль-Фараби» - правило запомнится</li>
     <li>«Забудь про Аль-Фараби» / «Сбрось все правила»</li>
   </ul>
+  <label>Запомненные места</label>
+  <div id="placesList" class="small">Пока нет. Скажите место с адресом - навигатор запомнит.</div>
   <div class="row">
     <button id="saveBtn" type="button" class="primary">Готово</button>
   </div>
@@ -197,9 +200,14 @@ const SYSTEM = `Ты голосовой помощник навигатора в
   "remove_rule" - просит убрать правило ("забудь про Абая", "можно снова по Абая");
   "clear_rules" - сбросить все правила;
   "other" - непонятно или не про маршрут.
-- destination: конечная точка поездки, как поисковый запрос в Алматы: название места как его пишут (бренды латиницей: "Mega Park", "Dostyk Plaza") или адрес ("проспект Абая 150"). Если водитель назвал и название, и улицу - добавь улицу: "Bright School, улица Тимирязева". Пустая строка, если не назван.
-- stops: места, куда надо заехать ДО конечной точки, по порядку ("сначала в школу, потом в кафе" -> stops=["школа ..."], destination="кафе ..."). Пустой массив, если остановок нет.
-- origin: откуда ехать, только если водитель явно назвал старт не из текущего места ("от дома на Абая 10", "из Мега Парка"). Иначе пустая строка.
+Места (destination, stops, origin) - объекты {name, address}:
+  name - название места как его пишут (бренды латиницей: "Mega Park", "International Bright School"; кафе - как называется: "Форт Верный"). Для чистого адреса name = адрес.
+  address - адрес, только если водитель его назвал: "улица Розы Жамановой 102". Иначе "".
+  Если место есть в known_places (водитель говорит "садик", "дом", "работа" или похожее название) - возьми name точно как в списке.
+  Названия улиц Алматы пиши правильно и полностью, даже если водитель сказал неточно: "Ракеша 25А" -> "улица Данеш Ракишева 25А", "Абая" -> "проспект Абая".
+- destination: конечная точка поездки. {name:"", address:""}, если не названа.
+- stops: места, куда надо заехать ДО конечной точки, по порядку ("сначала в садик, потом в кафе" -> stops=[садик], destination=кафе). Пустой массив, если остановок нет.
+- origin: откуда ехать, только если водитель явно назвал старт не из текущего места ("от Ракишева 25А", "из Мега Парка"). Иначе {name:"", address:""}.
 - via: улицы или места, через которые надо проехать. Улицы - полным русским названием как в OpenStreetMap: "улица Сатпаева", "проспект Абая", "проспект Аль-Фараби", "улица Толе би", "проспект Достык", "улица Жандосова", "проспект Райымбека", "Восточная объездная дорога".
 - avoid_streets: улицы, которые надо объехать целиком (тем же форматом).
 - avoid_spots: конкретные места, которые надо объехать (ремонт, яма, авария, неровная дорога в конкретном месте):
@@ -214,14 +222,20 @@ const SYSTEM = `Ты голосовой помощник навигатора в
 Если часть просьбы непонятна (например "по той улице, которая потом" без названия) - выполни то, что понятно, а в reply_ru коротко спроси уточнение: "Какую улицу Вы имеете в виду?". Если непонятно ничего - intent "other" и вопрос в reply_ru.
 Учитывай контекст текущей поездки, который придёт в сообщении.`;
 
+const PLACE = {
+  type: "OBJECT",
+  properties: { name: { type: "STRING" }, address: { type: "STRING" } },
+  required: ["name", "address"]
+};
+
 const SCHEMA = {
   type: "OBJECT",
   properties: {
     heard: { type: "STRING" },
     intent: { type: "STRING", enum: ["route", "change", "alternative", "remove_rule", "clear_rules", "other"] },
-    destination: { type: "STRING" },
-    stops: { type: "ARRAY", items: { type: "STRING" } },
-    origin: { type: "STRING" },
+    destination: PLACE,
+    stops: { type: "ARRAY", items: PLACE },
+    origin: PLACE,
     via: { type: "ARRAY", items: { type: "STRING" } },
     avoid_streets: { type: "ARRAY", items: { type: "STRING" } },
     avoid_spots: {
@@ -253,6 +267,8 @@ let apiKey = store.get("key", "");
 let rules = store.get("nav_rules", []);
 // поездка: {origin?:{name,lat,lon}, stops:[{name,lat,lon}], dest:{name,lat,lon,address}, handedOff, alt}
 let trip = store.get("nav_trip", null);
+// запомненные места: {name, alias?, lat, lon, address}
+let places = store.get("nav_places", []);
 let route = null;        // {shape:[[lat,lon]], km, min, yandexVias:[[lat,lon]]}
 let here = null;         // [lat, lon]
 
@@ -401,40 +417,100 @@ async function nominatim(q, extra) {
   return res.json();
 }
 
-// неточный поиск принимаем, только если совпало отличительное слово названия:
-// «International Bright School» не должна превратиться в «Kazakhstan International School»
-const GENERIC = /^(international|school|cafe|coffee|restaurant|center|centre|plaza|park|city|almaty|school|kids|club|улица|проспект|школа|кафе|ресторан|центр|тц|трц|трк|бц|детский|сад|международная|алматы)$/i;
+// найденное принимаем, только если совпали все отличительные слова названия:
+// «International Bright School» не должна превратиться в «Kazakhstan International School», а «Форт Верный» - в «Форт Горный»
+const GENERIC = /^(international|school|preschool|cafe|coffee|restaurant|center|centre|plaza|park|city|almaty|kids|club|улица|проспект|микрорайон|школа|садик|сад|кафе|ресторан|центр|тц|трц|трк|бц|детский|международная|алматы|көшесі|даңғылы)$/i;
+// казахские и русские варианты написания: Ракишева = Ракышева, Жамановой = Жаманова
+const norm = t => t.toLowerCase().replace(/[ыі]/g, "и").replace(/ё/g, "е").replace(/ә/g, "а").replace(/[ұү]/g, "у")
+  .replace(/қ/g, "к").replace(/ғ/g, "г").replace(/ң/g, "н").replace(/ө/g, "о").replace(/һ/g, "х");
 function sameName(query, name) {
-  const words = t => t.toLowerCase().split(/[^a-zа-яёәіңғүұқөһ0-9]+/i).filter(w => w.length >= 3 && !GENERIC.test(w));
+  // номера домов сверяются отдельно; слова сравниваем по общему началу, чтобы «Розы» = «Роза», «Жамановой» = «Жаманова»
+  const words = t => norm(t).split(/[^a-zа-я0-9]+/i).filter(w => w.length >= 3 && !/\d/.test(w) && !GENERIC.test(w));
+  const same = (a, b) => {
+    let k = 0;
+    while (k < a.length && a[k] === b[k]) k++;
+    return k >= Math.max(3, Math.min(a.length, b.length) - 2);
+  };
   const q = words(query), n = words(name);
   if (!q.length) return true;
-  return q.some(w => n.some(x => x.startsWith(w.slice(0, 5)) || w.startsWith(x.slice(0, 5))));
+  return q.every(w => n.some(x => same(w, x)));
 }
+const inAlmaty = (lat, lon) => lat > 43.03 && lat < 43.42 && lon > 76.70 && lon < 77.20;
 
-async function findPlace(q) {
-  // 1) OpenStreetMap
+// поиск по бесплатной карте OpenStreetMap: сначала точный, потом неточный (Photon)
+async function osmFind(q) {
+  const hasNumber = /\d/.test(q);
+  let streetOnly = null;
   const list = await nominatim(q, "&limit=1&addressdetails=1").catch(() => []);
-  if (list.length) {
-    const x = list[0], a = x.address || {};
-    return { name: x.name || q, lat: +x.lat, lon: +x.lon, address: [a.road, a.house_number].filter(Boolean).join(" ") };
+  const x = list[0], a = x?.address || {};
+  if (x && sameName(q, [x.name, a.road, a.house_number].filter(Boolean).join(" "))) {
+    const pl = { name: x.name || q, lat: +x.lat, lon: +x.lon, address: [a.road, a.house_number].filter(Boolean).join(" ") };
+    if (!hasNumber || a.house_number) return pl;
+    streetOnly = { ...pl, name: q, approx: true };   // дом не нашёлся, только улица
   }
-  // 2) Photon - тот же OpenStreetMap, но прощает неточные названия
   try {
-    const res = await fetch(`https://photon.komoot.io/api/?limit=1&lat=${ALMATY[0]}&lon=${ALMATY[1]}&bbox=76.70,43.03,77.20,43.42&q=${encodeURIComponent(q)}`);
-    const f = (await res.json()).features?.[0];
-    if (f && sameName(q, f.properties.name || "")) {
+    const res = await fetch(`https://photon.komoot.io/api/?limit=3&lat=${ALMATY[0]}&lon=${ALMATY[1]}&bbox=76.70,43.03,77.20,43.42&q=${encodeURIComponent(q)}`);
+    for (const f of (await res.json()).features || []) {
       const pr = f.properties;
+      const full = [pr.name, pr.street, pr.housenumber].filter(Boolean).join(" ");
+      if (!sameName(q, full)) continue;
+      if (hasNumber && !pr.housenumber && streetOnly) continue;
       return { name: pr.name || q, lat: f.geometry.coordinates[1], lon: f.geometry.coordinates[0], address: [pr.street, pr.housenumber].filter(Boolean).join(" ") };
     }
   } catch {}
-  // 3) места нет на бесплатной карте - ищем адрес через поиск Google и находим адрес на карте
-  const g = await geminiFind(q).catch(() => null);
-  if (g?.address) {
-    const byAddr = await nominatim(g.address, "&limit=1").catch(() => []);
-    if (byAddr.length) return { name: g.name || q, lat: +byAddr[0].lat, lon: +byAddr[0].lon, address: g.address };
+  return streetOnly;
+}
+
+function savedPlace(name) {
+  return places.find(pl => sameName(name, pl.name) && sameName(pl.name, name)) || null;
+}
+
+function rememberPlace(pl) {
+  places = places.filter(x => x.name.toLowerCase() !== pl.name.toLowerCase());
+  places.unshift({ name: pl.name, lat: pl.lat, lon: pl.lon, address: pl.address || "" });
+  if (places.length > 40) places.length = 40;
+  store.set("nav_places", places);
+}
+
+// spec: {name, address} от Gemini
+async function findPlace(spec) {
+  const name = (spec.name || spec.address || "").trim();
+  const address = (spec.address || "").trim();
+  if (!name) throw new Error("Не поняла, куда ехать. Повторите, пожалуйста.");
+
+  // 1) адрес назван - ищем по адресу и запоминаем место под этим названием
+  if (address) {
+    const pl = await osmFind(address);
+    if (pl) {
+      const found = { ...pl, name, address: pl.address || address };
+      if (name !== address) rememberPlace(found);
+      return found;
+    }
   }
-  if (g && g.lat > 43.03 && g.lat < 43.42 && g.lon > 76.70 && g.lon < 77.20) return { name: g.name || q, lat: g.lat, lon: g.lon, address: g.address || "" };
-  throw new Error(`Не нашла «${q}» в Алматы. Скажите адрес или улицу рядом.`);
+  // 2) уже запомненное место
+  const saved = savedPlace(name);
+  if (saved) return saved;
+  // 3) бесплатная карта
+  const pl = await osmFind(name);
+  if (pl && !pl.approx) return pl;
+  // 4) места нет на карте - ищем адрес через поиск Google
+  let why = "";
+  const g = await geminiFind(name).catch(e => { why = e.message; return null; });
+  if (g?.address) {
+    const byAddr = await osmFind(g.address);
+    if (byAddr) {
+      const found = { ...byAddr, name: g.name || name, address: g.address };
+      rememberPlace(found);
+      return found;
+    }
+  }
+  if (g && inAlmaty(+g.lat, +g.lon)) {
+    const found = { name: g.name || name, lat: +g.lat, lon: +g.lon, address: g.address || "" };
+    rememberPlace(found);
+    return found;
+  }
+  if (pl) return pl;
+  throw new Error(`Не нашла «${name}»${why ? " (" + why + ")" : ""}. Скажите адрес, например: «садик на Розы Жамановой 102» - я запомню это место.`);
 }
 
 const streetCache = {};
@@ -650,6 +726,7 @@ async function askGemini(parts) {
   const context = {
     current_destination: trip?.dest?.name || null,
     stops: (trip?.stops || []).map(st => st.name),
+    known_places: places.map(pl => pl.name + (pl.alias ? " (" + pl.alias + ")" : "")),
     active_rules: rules.map(r => (r.permanent ? "[всегда] " : "") + r.label)
   };
   const body = JSON.stringify({
@@ -665,10 +742,26 @@ async function geminiFind(q) {
     contents: [{ role: "user", parts: [{ text: `Найди в интернете место в Алматы: "${q}". Ответь только одной строкой JSON без пояснений: {"name": "название", "address": "улица и номер дома в Алматы, по-русски", "lat": широта, "lon": долгота}. Если не нашла - {"name": ""}.` }] }],
     tools: [{ google_search: {} }]
   });
-  const text = await geminiText(body);
-  const m = text.match(/\{[\s\S]*\}/);
-  const g = m ? JSON.parse(m[0]) : null;
-  return g && g.name ? g : null;
+  let lastError = "";
+  for (const model of ["gemini-flash-latest", "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"]) {
+    try {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+        body
+      });
+      if (!res.ok) { lastError = "поиск Google: ошибка " + res.status; continue; }
+      const data = await res.json();
+      const text = (data.candidates?.[0]?.content?.parts || []).filter(p => !p.thought).map(p => p.text || "").join("");
+      const m = text.match(/\{[\s\S]*?\}/);
+      if (!m) { lastError = "поиск Google: пустой ответ"; continue; }
+      const g = JSON.parse(m[0]);
+      return g && g.name ? g : null;
+    } catch (e) {
+      lastError = "поиск Google: " + (e.message || "нет связи");
+    }
+  }
+  throw new Error(lastError);
 }
 
 async function geminiText(body) {
@@ -726,13 +819,13 @@ async function applyCommand(c) {
     const stops = [];
     for (const st of c.stops || []) stops.push(await findPlace(st));
     trip = {
-      origin: c.origin ? await findPlace(c.origin) : null,
+      origin: c.origin?.name || c.origin?.address ? await findPlace(c.origin) : null,
       stops,
       dest: await findPlace(c.destination),
       alt: 0,
       handedOff: false
     };
-  } else if (c.destination && trip) {
+  } else if ((c.destination?.name || c.destination?.address) && trip) {
     trip.dest = await findPlace(c.destination);
   }
   if (c.intent === "alternative" && trip) trip.alt = (trip.alt || 0) + 1;
@@ -746,7 +839,7 @@ async function applyCommand(c) {
       const from = here || ALMATY, to = trip?.dest ? [trip.dest.lat, trip.dest.lon] : from;
       p = closestOnLines(lines, q => distToSegment(q, from, to));
     } else {
-      const place = await findPlace(v);
+      const place = await findPlace({ name: v, address: "" });
       p = [place.lat, place.lon];
     }
     rules.push({ id: newId(), kind: "via", label: "через: " + v, lat: p[0], lon: p[1], permanent: false });
@@ -783,7 +876,8 @@ async function applyCommand(c) {
   await rebuild();
   if (route) {
     // показываем, что именно нашлось, - чтобы было видно, если навигатор понял не то место
-    const found = [...(trip.stops || []), trip.dest].map(pl => pl.name + (pl.address ? ` (${pl.address})` : "")).join(" → ");
+    const found = [trip.origin, ...(trip.stops || []), trip.dest].filter(Boolean)
+      .map(pl => pl.name + (pl.address && pl.address !== pl.name ? ` (${pl.address})` : "") + (pl.approx ? " - примерно, дом не нашла" : "")).join(" → ");
     note((c.reply_ru ? c.reply_ru + " " : "") + "Нашла: " + found);
     sayRu(c.reply_ru);
     // если уже едем - сразу возвращаемся в Яндекс с новым маршрутом
@@ -911,7 +1005,22 @@ $("typeForm").onsubmit = e => {
   handle([{ text: "Команда водителя текстом: " + text }]);
 };
 
+function renderPlaces() {
+  const box = $("placesList");
+  if (!places.length) { box.textContent = "Пока нет. Скажите место с адресом - навигатор запомнит."; return; }
+  box.innerHTML = "";
+  for (const pl of places) {
+    const b = document.createElement("button");
+    b.className = "chip opt";
+    b.style.margin = "0 6px 6px 0";
+    b.textContent = pl.name + (pl.address && pl.address !== pl.name ? " - " + pl.address : "") + "  ✕";
+    b.onclick = () => { places = places.filter(x => x !== pl); store.set("nav_places", places); renderPlaces(); };
+    box.append(b);
+  }
+}
+
 function openSettings() {
+  renderPlaces();
   $("keyInput").value = apiKey;
   $("settings").showModal();
 }
