@@ -1,0 +1,801 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Маршрут">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<title>Маршрут</title>
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --card: #ffffff;
+    --text: #17191c;
+    --muted: #6d737b;
+    --line: #e3e6ea;
+    --accent: #2563eb;
+    --accent-soft: #e6eefe;
+    --avoid: #dc2626;
+    --avoid-soft: #fdecec;
+    --via: #16a34a;
+    --via-soft: #e8f6ed;
+    --ya: #fc3f1d;
+    --shadow: 0 -2px 12px rgba(0, 0, 0, .08);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #121417; --card: #1c1f23; --text: #eef0f2; --muted: #9aa1a9; --line: #2c3036;
+      --accent: #5b8cff; --accent-soft: #1d2a45; --avoid: #f87171; --avoid-soft: #3a1f1f;
+      --via: #4ade80; --via-soft: #17301f; --shadow: none;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #121417; --card: #1c1f23; --text: #eef0f2; --muted: #9aa1a9; --line: #2c3036;
+    --accent: #5b8cff; --accent-soft: #1d2a45; --avoid: #f87171; --avoid-soft: #3a1f1f;
+    --via: #4ade80; --via-soft: #17301f; --shadow: none;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; height: 100dvh;
+    -webkit-tap-highlight-color: transparent;
+  }
+  button { font: inherit; color: inherit; }
+  #map { flex: 1; min-height: 200px; }
+  #settingsBtn {
+    position: absolute; z-index: 1000; right: 12px; top: calc(env(safe-area-inset-top) + 12px);
+    width: 42px; height: 42px; border-radius: 50%; border: 0; background: var(--card);
+    box-shadow: 0 2px 8px rgba(0,0,0,.15); font-size: 18px;
+  }
+
+  .panel {
+    background: var(--card); box-shadow: var(--shadow);
+    border-radius: 20px 20px 0 0; margin-top: -16px; z-index: 1000; position: relative;
+    padding: 16px 16px calc(env(safe-area-inset-bottom) + 14px);
+  }
+  .trip b { font-size: 19px; display: block; }
+  .trip .meta { color: var(--muted); font-size: 14px; }
+  .heard { color: var(--muted); font-size: 14px; font-style: italic; margin-top: 6px; min-height: 0; }
+  .heard:empty { display: none; }
+  #chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  #chips:empty { display: none; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px; border: 0;
+    padding: 6px 10px; border-radius: 16px; font-size: 14px;
+  }
+  .chip.avoid { background: var(--avoid-soft); color: var(--avoid); }
+  .chip.via { background: var(--via-soft); color: var(--via); }
+  .chip.opt { background: var(--accent-soft); color: var(--accent); }
+  .chip .x { opacity: .7; }
+  .chip .forever { font-size: 11px; text-transform: uppercase; letter-spacing: .03em; opacity: .8; }
+
+  .controls { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
+  .side {
+    width: 52px; height: 52px; flex: none; border-radius: 50%; border: 0;
+    background: var(--bg); font-size: 16px; font-weight: 600;
+  }
+  #mic {
+    width: 72px; height: 72px; border-radius: 50%; border: 0; flex: none; margin: 0 auto;
+    background: var(--accent); color: #fff; font-size: 28px;
+    box-shadow: 0 4px 14px rgba(37, 99, 235, .35);
+  }
+  body.listening #mic { background: var(--avoid); animation: pulse 1.2s infinite; }
+  body.thinking #mic { opacity: .5; }
+  @keyframes pulse { 50% { transform: scale(1.07); } }
+  #goBtn {
+    flex: none; height: 52px; padding: 0 16px; border-radius: 26px; border: 0;
+    background: var(--ya); color: #fff; font-weight: 600;
+  }
+  #goBtn:disabled { opacity: .35; }
+  #typeForm { display: none; flex: 1; gap: 8px; }
+  body.typing #typeForm { display: flex; }
+  body.typing #mic, body.typing #goBtn { display: none; }
+  #typeInput {
+    flex: 1; min-width: 0; padding: 12px 14px; border-radius: 24px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit;
+  }
+  #typeForm button { border: 0; border-radius: 24px; padding: 0 16px; background: var(--accent); color: #fff; }
+
+  dialog {
+    border: 0; border-radius: 18px; padding: 20px; width: min(420px, calc(100vw - 32px));
+    background: var(--card); color: var(--text);
+  }
+  dialog::backdrop { background: rgba(0,0,0,.4); }
+  dialog h2 { margin: 0 0 12px; font-size: 20px; }
+  dialog label { display: block; font-size: 14px; color: var(--muted); margin: 14px 0 6px; }
+  dialog input {
+    width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--text); font: inherit;
+  }
+  dialog .small { font-size: 13px; color: var(--muted); margin-top: 6px; }
+  dialog ul { margin: 6px 0 0; padding-left: 18px; font-size: 14px; }
+  dialog a { color: var(--accent); }
+  .row { display: flex; gap: 10px; margin-top: 20px; }
+  .row button { flex: 1; padding: 12px; border-radius: 12px; border: 0; background: var(--bg); }
+  .row .primary { background: var(--accent); color: #fff; }
+  #toast {
+    position: fixed; z-index: 2000; left: 50%; top: calc(env(safe-area-inset-top) + 64px); transform: translateX(-50%);
+    background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 12px; font-size: 14px;
+    width: max-content; max-width: calc(100vw - 32px); opacity: 0; pointer-events: none; transition: opacity .2s;
+  }
+  #toast.show { opacity: .95; }
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+<button id="settingsBtn" aria-label="Настройки">⚙︎</button>
+
+<section class="panel">
+  <div class="trip">
+    <b id="destName">Куда едем?</b>
+    <div class="meta" id="meta">Нажмите 🎙 и скажите, например: «До Мега Парка через Сатпаева, Абая объедь»</div>
+  </div>
+  <div class="heard" id="heard"></div>
+  <div id="chips"></div>
+  <div class="controls">
+    <button class="side" id="kbBtn" aria-label="Написать текстом">Aa</button>
+    <button id="mic" aria-label="Говорить">🎙</button>
+    <form id="typeForm">
+      <input id="typeInput" type="text" autocomplete="off" placeholder="Например: объедь Абая">
+      <button type="submit">↑</button>
+    </form>
+    <button id="goBtn" disabled>Яндекс →</button>
+  </div>
+</section>
+
+<dialog id="settings">
+  <h2>Настройки</h2>
+  <label for="keyInput">Ключ Gemini API</label>
+  <input id="keyInput" type="password" autocomplete="off" placeholder="AIza…">
+  <div class="small">Тот же ключ, что и для Mia. Бесплатно: <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>. Хранится только на этом телефоне.</div>
+  <label>Что можно говорить</label>
+  <ul>
+    <li>«До Мега Парка через Сатпаева»</li>
+    <li>«Объедь Абая» / «Абая у Байтурсынова ремонт, объедь»</li>
+    <li>«Впереди ремонт» / «Тут ямы, объедь»</li>
+    <li>«Предложи другой вариант»</li>
+    <li>«Всегда объезжай Аль-Фараби» - правило запомнится</li>
+    <li>«Забудь про Аль-Фараби» / «Сбрось все правила»</li>
+  </ul>
+  <div class="row">
+    <button id="saveBtn" type="button" class="primary">Готово</button>
+  </div>
+</dialog>
+
+<div id="toast"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+const ALMATY = [43.238, 76.945];
+const VIEWBOX = "76.70,43.42,77.20,43.03";
+const VALHALLA = "https://valhalla1.openstreetmap.de/route";
+const MODELS = ["gemini-flash-latest", "gemini-3.6-flash"];
+
+const SYSTEM = `Ты голосовой помощник навигатора в Алматы (Казахстан). Водитель говорит по-русски (иногда с казахскими названиями). Твоя задача - понять, что изменить в маршруте, и вернуть JSON.
+
+Поля:
+- heard: дословно, что сказал водитель.
+- intent:
+  "route" - новая поездка (назван пункт назначения);
+  "change" - изменить текущий маршрут (объехать, проехать через, неровная дорога и т.п.);
+  "alternative" - просит другой вариант без конкретики;
+  "remove_rule" - просит убрать правило ("забудь про Абая", "можно снова по Абая");
+  "clear_rules" - сбросить все правила;
+  "other" - непонятно или не про маршрут.
+- destination: куда ехать, как поисковый запрос для OpenStreetMap в Алматы (например "Mega Park", "Dostyk Plaza", "аэропорт Алматы", "проспект Абая 150"). Пустая строка, если не назван.
+- via: улицы или места, через которые надо проехать. Улицы - полным русским названием как в OpenStreetMap: "улица Сатпаева", "проспект Абая", "проспект Аль-Фараби", "улица Толе би", "проспект Достык", "улица Жандосова", "проспект Райымбека", "Восточная объездная дорога".
+- avoid_streets: улицы, которые надо объехать целиком (тем же форматом).
+- avoid_spots: конкретные места, которые надо объехать (ремонт, яма, авария, неровная дорога в конкретном месте):
+  {street, cross, here}. Перекрёсток или участок "Абая у Байтурсынова" -> street="проспект Абая", cross="улица Байтурсынова", here=false.
+  "Впереди ремонт", "тут ямы", "здесь пробка", "там неровная дорога" без названия -> street="", cross="", here=true.
+- avoid_unpaved: true, если просит избегать грунтовок/плохих дорог вообще.
+- remember: true, если говорит "всегда", "запомни", "постоянно", "никогда не вези через". Иначе false.
+- remove: названия улиц/правил, которые надо убрать (для remove_rule).
+- reply_ru: одно короткое предложение-подтверждение, на "Вы", без лишних слов. Например "Объезжаю Абая, маршрут через Сатпаева."
+
+Учитывай контекст текущей поездки, который придёт в сообщении.`;
+
+const SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    heard: { type: "STRING" },
+    intent: { type: "STRING", enum: ["route", "change", "alternative", "remove_rule", "clear_rules", "other"] },
+    destination: { type: "STRING" },
+    via: { type: "ARRAY", items: { type: "STRING" } },
+    avoid_streets: { type: "ARRAY", items: { type: "STRING" } },
+    avoid_spots: {
+      type: "ARRAY",
+      items: {
+        type: "OBJECT",
+        properties: { street: { type: "STRING" }, cross: { type: "STRING" }, here: { type: "BOOLEAN" } },
+        required: ["street", "cross", "here"]
+      }
+    },
+    avoid_unpaved: { type: "BOOLEAN" },
+    remember: { type: "BOOLEAN" },
+    remove: { type: "ARRAY", items: { type: "STRING" } },
+    reply_ru: { type: "STRING" }
+  },
+  required: ["heard", "intent", "destination", "via", "avoid_streets", "avoid_spots", "avoid_unpaved", "remember", "remove", "reply_ru"],
+  propertyOrdering: ["heard", "intent", "destination", "via", "avoid_streets", "avoid_spots", "avoid_unpaved", "remember", "remove", "reply_ru"]
+};
+
+// ---------- хранилище (только на этом устройстве) ----------
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
+};
+
+let apiKey = store.get("key", "");
+// правило: {id, kind:'street'|'spot'|'via'|'unpaved', label, permanent, lat?, lon?, street?, lines?}
+let rules = store.get("nav_rules", []);
+// поездка: {dest:{name,lat,lon}, handedOff, alt}
+let trip = store.get("nav_trip", null);
+let route = null;        // {shape:[[lat,lon]], km, min, yandexVias:[[lat,lon]]}
+let here = null;         // [lat, lon]
+
+const $ = id => document.getElementById(id);
+
+function save() {
+  store.set("nav_rules", rules);
+  store.set("nav_trip", trip);
+}
+
+function setMode(mode) {
+  document.body.classList.remove("listening", "thinking");
+  if (mode) document.body.classList.add(mode);
+  $("mic").textContent = mode === "listening" ? "■" : "🎙";
+}
+
+function toast(text) {
+  const t = $("toast");
+  t.textContent = text;
+  t.classList.add("show");
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => t.classList.remove("show"), 4000);
+}
+
+function sayRu(text) {
+  try {
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = "ru-RU";
+    const v = speechSynthesis.getVoices().find(v => /^ru/i.test(v.lang));
+    if (v) u.voice = v;
+    speechSynthesis.speak(u);
+  } catch {}
+}
+
+// ---------- карта ----------
+const map = L.map("map", { zoomControl: false, attributionControl: true }).setView(ALMATY, 12);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 19, attribution: "© OpenStreetMap"
+}).addTo(map);
+const layer = L.layerGroup().addTo(map);
+
+function drawAll() {
+  layer.clearLayers();
+  if (here) L.circleMarker(here, { radius: 8, color: "#fff", weight: 3, fillColor: "#2563eb", fillOpacity: 1 }).addTo(layer);
+  for (const r of rules) {
+    if (r.kind === "spot") L.circle([r.lat, r.lon], { radius: 120, color: "#dc2626", weight: 2, fillOpacity: .2 }).addTo(layer);
+    if (r.kind === "street" && r.lines) for (const line of r.lines) L.polyline(line, { color: "#dc2626", weight: 5, opacity: .35 }).addTo(layer);
+    if (r.kind === "via") L.circleMarker([r.lat, r.lon], { radius: 7, color: "#16a34a", weight: 3, fillColor: "#fff", fillOpacity: 1 }).addTo(layer);
+  }
+  if (route) L.polyline(route.shape, { color: "#2563eb", weight: 6, opacity: .85 }).addTo(layer);
+  if (trip?.dest) L.marker([trip.dest.lat, trip.dest.lon]).addTo(layer);
+  if (route) map.fitBounds(L.latLngBounds(route.shape).pad(0.15));
+}
+
+function renderPanel() {
+  $("destName").textContent = trip?.dest?.name || "Куда едем?";
+  $("meta").textContent = route
+    ? `${route.min} мин · ${route.km} км без учёта пробок - точное время покажет Яндекс`
+    : trip?.dest ? "Строю маршрут…" : "Нажмите 🎙 и скажите, например: «До Мега Парка через Сатпаева, Абая объедь»";
+  $("goBtn").disabled = !route;
+
+  const box = $("chips");
+  box.innerHTML = "";
+  for (const r of rules) {
+    const b = document.createElement("button");
+    b.className = "chip " + (r.kind === "via" ? "via" : r.kind === "unpaved" ? "opt" : "avoid");
+    const label = document.createElement("span");
+    label.textContent = r.label;
+    b.append(label);
+    if (r.permanent) {
+      const f = document.createElement("span");
+      f.className = "forever";
+      f.textContent = "всегда";
+      b.append(f);
+    }
+    const x = document.createElement("span");
+    x.className = "x";
+    x.textContent = "✕";
+    b.append(x);
+    b.onclick = () => { rules = rules.filter(q => q !== r); save(); rebuild(); };
+    box.append(b);
+  }
+}
+
+// ---------- геометрия ----------
+const R = 6371000;
+function dist(a, b) {
+  const x = (b[1] - a[1]) * Math.PI / 180 * Math.cos((a[0] + b[0]) / 2 * Math.PI / 180);
+  const y = (b[0] - a[0]) * Math.PI / 180;
+  return Math.sqrt(x * x + y * y) * R;
+}
+function bearing(a, b) {
+  const la1 = a[0] * Math.PI / 180, la2 = b[0] * Math.PI / 180, dl = (b[1] - a[1]) * Math.PI / 180;
+  const y = Math.sin(dl) * Math.cos(la2), x = Math.cos(la1) * Math.sin(la2) - Math.sin(la1) * Math.cos(la2) * Math.cos(dl);
+  return Math.round((Math.atan2(y, x) * 180 / Math.PI + 360) % 360);
+}
+function distToSegment(p, a, b) {
+  const kx = Math.cos(p[0] * Math.PI / 180);
+  const ax = a[1] * kx, ay = a[0], bx = b[1] * kx, by = b[0], px = p[1] * kx, py = p[0];
+  const dx = bx - ax, dy = by - ay;
+  const t = dx || dy ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy))) : 0;
+  return dist(p, [ay + t * dy, (ax + t * dx) / kx]);
+}
+function distToLines(p, lines) {
+  let best = Infinity;
+  for (const line of lines) for (let i = 1; i < line.length; i++) best = Math.min(best, distToSegment(p, line[i - 1], line[i]));
+  return best;
+}
+function boxAround(p, meters) {
+  const dLat = meters / 111320, dLon = meters / (111320 * Math.cos(p[0] * Math.PI / 180));
+  return [[p[1] - dLon, p[0] - dLat], [p[1] + dLon, p[0] - dLat], [p[1] + dLon, p[0] + dLat], [p[1] - dLon, p[0] + dLat], [p[1] - dLon, p[0] - dLat]];
+}
+function decodeShape(s) {
+  let idx = 0, lat = 0, lon = 0;
+  const pts = [];
+  while (idx < s.length) {
+    for (let k = 0; k < 2; k++) {
+      let shift = 0, res = 0, b;
+      do { b = s.charCodeAt(idx++) - 63; res |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+      const d = res & 1 ? ~(res >> 1) : res >> 1;
+      if (k === 0) lat += d; else lon += d;
+    }
+    pts.push([lat / 1e6, lon / 1e6]);
+  }
+  return pts;
+}
+
+// ---------- поиск мест и улиц (OpenStreetMap) ----------
+let lastNominatim = 0;
+async function nominatim(q, extra) {
+  const wait = lastNominatim + 1100 - Date.now();   // правило сервиса: не чаще 1 запроса в секунду
+  if (wait > 0) await new Promise(r => setTimeout(r, wait));
+  lastNominatim = Date.now();
+  const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&accept-language=ru&countrycodes=kz&viewbox=${VIEWBOX}&bounded=1&q=${encodeURIComponent(q)}${extra || ""}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("Поиск адресов недоступен, попробуйте чуть позже.");
+  return res.json();
+}
+
+async function findPlace(q) {
+  const list = await nominatim(q, "&limit=1");
+  if (!list.length) throw new Error(`Не нашла «${q}» в Алматы. Скажите иначе, например с улицей.`);
+  const x = list[0];
+  return { name: x.name || q, lat: +x.lat, lon: +x.lon };
+}
+
+const streetCache = {};
+async function findStreet(name) {
+  if (streetCache[name]) return streetCache[name];
+  const list = await nominatim(name, "&limit=40&polygon_geojson=1");
+  const lines = [];
+  for (const x of list) {
+    if (x.category !== "highway" || !x.geojson) continue;
+    const g = x.geojson;
+    const parts = g.type === "LineString" ? [g.coordinates] : g.type === "MultiLineString" ? g.coordinates : [];
+    for (const part of parts) lines.push(part.map(c => [c[1], c[0]]));
+  }
+  if (!lines.length) throw new Error(`Не нашла улицу «${name}». Скажите полное название.`);
+  streetCache[name] = lines;
+  return lines;
+}
+
+function closestOnLines(lines, target) {
+  let best = null, bestD = Infinity;
+  for (const line of lines) for (const p of line) {
+    const d = target(p);
+    if (d < bestD) { bestD = d; best = p; }
+  }
+  return best;
+}
+
+async function crossing(a, b) {
+  const la = await findStreet(a), lb = await findStreet(b);
+  let best = null, bestD = Infinity;
+  for (const p of la.flat()) {
+    const d = distToLines(p, lb);
+    if (d < bestD) { bestD = d; best = p; }
+  }
+  if (bestD > 150) throw new Error(`Не нашла, где пересекаются ${a} и ${b}.`);
+  return best;
+}
+
+function getHere() {
+  return new Promise((resolve, reject) => {
+    navigator.geolocation.getCurrentPosition(
+      p => { here = [p.coords.latitude, p.coords.longitude]; resolve(here); },
+      () => reject(new Error("Нет доступа к геолокации. Разрешите её для этого сайта в настройках Safari.")),
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 15000 }
+    );
+  });
+}
+
+// точка на текущем маршруте ~200 м впереди - туда, где водитель видит ремонт
+function pointAhead(meters) {
+  if (!route || !here) return here;
+  let i0 = 0, best = Infinity;
+  route.shape.forEach((p, i) => { const d = dist(p, here); if (d < best) { best = d; i0 = i; } });
+  let acc = 0;
+  for (let i = i0 + 1; i < route.shape.length; i++) {
+    acc += dist(route.shape[i - 1], route.shape[i]);
+    if (acc >= meters) return route.shape[i];
+  }
+  return route.shape[route.shape.length - 1];
+}
+
+// ---------- построение маршрута ----------
+async function valhalla(body) {
+  const res = await fetch(VALHALLA, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const data = await res.json();
+  if (!res.ok || !data.trip) throw new Error("Не получилось построить маршрут с такими правилами. Попробуйте убрать одно из них.");
+  return data;
+}
+
+async function buildRoute() {
+  const from = await getHere();
+  const dest = [trip.dest.lat, trip.dest.lon];
+
+  const vias = rules.filter(r => r.kind === "via").map(r => [r.lat, r.lon]);
+  // проезжаем промежуточные точки по порядку от старта к финишу
+  vias.sort((a, b) => dist(from, a) - dist(from, b));
+
+  const spots = rules.filter(r => r.kind === "spot").map(r => [r.lat, r.lon])
+    .filter(p => dist(p, from) > 150 && dist(p, dest) > 150);
+  const streets = rules.filter(r => r.kind === "street");
+  const unpaved = rules.some(r => r.kind === "unpaved");
+
+  const body = {
+    locations: [{ lat: from[0], lon: from[1] }, ...vias.map(p => ({ lat: p[0], lon: p[1], type: "through" })), { lat: dest[0], lon: dest[1] }],
+    costing: "auto",
+    costing_options: { auto: { exclude_unpaved: unpaved } },
+    exclude_polygons: spots.map(p => boxAround(p, 110)),
+    exclude_locations: [],
+    alternates: 2
+  };
+
+  // места ремонта, через которые прошёл бы обычный маршрут, - на них Яндексу нужна точка объезда
+  const detourAnchors = [];
+  if (spots.length) {
+    const plain = await valhalla({ ...body, exclude_polygons: [], alternates: 0 });
+    const plainShape = plain.trip.legs.flatMap(l => decodeShape(l.shape));
+    for (const p of spots) if (plainShape.some(q => dist(p, q) < 130)) detourAnchors.push(p);
+  }
+
+  // улицы, которые надо объехать: убираем те её кварталы, по которым пошёл маршрут, и пересчитываем
+  let data = await valhalla(body);
+  for (let pass = 0; pass < 3 && streets.length; pass++) {
+    const all = data.trip.legs.flatMap(l => decodeShape(l.shape));
+    let added = 0;
+    for (const s of streets) {
+      const onStreet = all.filter((p, i) => i > 0 && distToLines(p, s.lines) < 20 && dist(p, from) > 150 && dist(p, dest) > 150);
+      for (let i = 0; i < onStreet.length; i += 3) {
+        const p = onStreet[i], idx = all.indexOf(p), q = all[Math.min(idx + 1, all.length - 1)];
+        body.exclude_locations.push({ lat: p[0], lon: p[1], heading: bearing(all[idx - 1] || p, q), heading_tolerance: 35 });
+        added++;
+      }
+      if (onStreet.length) detourAnchors.push(onStreet[Math.floor(onStreet.length / 2)]);
+    }
+    if (!added) break;
+    data = await valhalla(body);
+  }
+
+  // «другой вариант» - берём альтернативу Valhalla, если она есть
+  const options = [data.trip, ...(data.alternates || []).map(a => a.trip)];
+  const chosen = options[(trip.alt || 0) % options.length];
+  if (trip.alt && options.length === 1) toast("Других разумных вариантов нет - оставила этот.");
+
+  const shape = chosen.legs.flatMap(l => decodeShape(l.shape));
+
+  // точки для Яндекса: через что проехать + по одной точке на каждом объезде,
+  // чтобы Яндекс не повёл обратно через ремонт
+  const yv = vias.map(p => ({ p, i: nearestIndex(shape, p) }));
+  for (const a of detourAnchors) {
+    let bi = -1, bd = Infinity;
+    shape.forEach((p, i) => { const d = dist(p, a); if (d > 160 && d < bd) { bd = d; bi = i; } });
+    if (bi >= 0) yv.push({ p: shape[bi], i: bi });
+  }
+  if (trip.alt && options.length > 1) for (const f of [0.35, 0.65]) { const i = Math.floor(shape.length * f); yv.push({ p: shape[i], i }); }
+  yv.sort((a, b) => a.i - b.i);
+
+  route = {
+    shape,
+    km: (chosen.summary.length).toFixed(1),
+    min: Math.round(chosen.summary.time / 60),
+    yandexVias: yv.slice(0, 6).map(v => v.p)
+  };
+}
+
+function nearestIndex(shape, p) {
+  let bi = 0, bd = Infinity;
+  shape.forEach((q, i) => { const d = dist(p, q); if (d < bd) { bd = d; bi = i; } });
+  return bi;
+}
+
+async function rebuild() {
+  save();
+  if (!trip?.dest) { route = null; renderPanel(); drawAll(); return; }
+  route = null;
+  renderPanel();
+  try {
+    await buildRoute();
+  } catch (e) {
+    toast(e.message);
+  }
+  renderPanel();
+  drawAll();
+}
+
+// ---------- Яндекс ----------
+function openYandex() {
+  if (!route || !trip?.dest) return;
+  trip.handedOff = true;
+  save();
+  const pts = [...route.yandexVias, [trip.dest.lat, trip.dest.lon]].map(p => p[0].toFixed(6) + "," + p[1].toFixed(6));
+  // пустая первая точка = «от моего местоположения»
+  const rtext = encodeURIComponent("~" + pts.join("~")).replace(/%2C/g, ",");
+  const app = `yandexmaps://maps.yandex.ru/?rtext=${rtext}&rtt=auto`;
+  const web = `https://yandex.kz/maps/?rtext=${rtext}&rtt=auto`;
+  const fallback = setTimeout(() => { if (!document.hidden) location.href = web; }, 1500);
+  document.addEventListener("visibilitychange", () => clearTimeout(fallback), { once: true });
+  location.href = app;
+}
+$("goBtn").onclick = openYandex;
+
+// ---------- Gemini ----------
+async function askGemini(parts) {
+  const context = {
+    current_destination: trip?.dest?.name || null,
+    active_rules: rules.map(r => (r.permanent ? "[всегда] " : "") + r.label)
+  };
+  const body = JSON.stringify({
+    systemInstruction: { parts: [{ text: SYSTEM }] },
+    contents: [{ role: "user", parts: [{ text: "Контекст поездки: " + JSON.stringify(context) }, ...parts] }],
+    generationConfig: { responseMimeType: "application/json", responseSchema: SCHEMA, temperature: 0.2 }
+  });
+  for (let i = 0; i < MODELS.length; i++) {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODELS[i]}:generateContent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+      body
+    });
+    if (res.status === 404 && i < MODELS.length - 1) continue;
+    if (!res.ok) {
+      const err = await res.text();
+      if (res.status === 429) throw new Error("Бесплатный лимит Gemini на минуту исчерпан - подождите немного.");
+      if (res.status === 403 || (res.status === 400 && /API key/i.test(err))) throw new Error("Ключ Gemini не подошёл - проверьте его в настройках.");
+      throw new Error("Ошибка Gemini " + res.status);
+    }
+    const data = await res.json();
+    const text = (data.candidates?.[0]?.content?.parts || []).filter(p => !p.thought).map(p => p.text || "").join("");
+    return JSON.parse(text);
+  }
+}
+
+const newId = () => Math.random().toString(36).slice(2, 9);
+
+async function applyCommand(c) {
+  $("heard").textContent = c.heard ? "«" + c.heard + "»" : "";
+  if (c.intent === "other") { sayRu(c.reply_ru || "Не поняла, повторите, пожалуйста."); return; }
+
+  if (c.intent === "clear_rules") rules = [];
+  if (c.intent === "remove_rule") {
+    const names = (c.remove || []).map(s => s.toLowerCase());
+    const key = s => s.toLowerCase().replace(/^(улица|проспект|переулок|микрорайон)\s+/, "");
+    rules = rules.filter(r => !names.some(n => key(r.label).includes(key(n)) || key(n).includes(key(r.label))));
+  }
+  if (c.intent === "route") {
+    // новая поездка: временные правила прошлой поездки больше не нужны
+    rules = rules.filter(r => r.permanent);
+    trip = { dest: await findPlace(c.destination), alt: 0, handedOff: false };
+  } else if (c.destination && trip) {
+    trip.dest = await findPlace(c.destination);
+  }
+  if (c.intent === "alternative" && trip) trip.alt = (trip.alt || 0) + 1;
+
+  const permanent = !!c.remember;
+  for (const v of c.via || []) {
+    const lines = await findStreet(v).catch(() => null);
+    let p;
+    if (lines) {
+      // точка улицы, ближайшая к прямой «старт - финиш»
+      const from = here || ALMATY, to = trip?.dest ? [trip.dest.lat, trip.dest.lon] : from;
+      p = closestOnLines(lines, q => distToSegment(q, from, to));
+    } else {
+      const place = await findPlace(v);
+      p = [place.lat, place.lon];
+    }
+    rules.push({ id: newId(), kind: "via", label: "через: " + v, lat: p[0], lon: p[1], permanent: false });
+  }
+  for (const s of c.avoid_streets || []) {
+    const lines = await findStreet(s);
+    rules.push({ id: newId(), kind: "street", label: "объезд: " + s, street: s, lines, permanent });
+  }
+  for (const s of c.avoid_spots || []) {
+    let p, label;
+    if (s.here || !s.street) {
+      if (!here) await getHere();
+      p = pointAhead(200);
+      label = "объезд: здесь";
+    } else if (s.cross) {
+      p = await crossing(s.street, s.cross);
+      label = `объезд: ${s.street} / ${s.cross}`;
+    } else {
+      const lines = await findStreet(s.street);
+      rules.push({ id: newId(), kind: "street", label: "объезд: " + s.street, street: s.street, lines, permanent });
+      continue;
+    }
+    rules.push({ id: newId(), kind: "spot", label, lat: p[0], lon: p[1], permanent });
+  }
+  if (c.avoid_unpaved && !rules.some(r => r.kind === "unpaved")) {
+    rules.push({ id: newId(), kind: "unpaved", label: "без грунтовок", permanent });
+  }
+
+  const wasDriving = trip?.handedOff;
+  await rebuild();
+  if (route) {
+    sayRu(c.reply_ru);
+    // если уже едем - сразу возвращаемся в Яндекс с новым маршрутом
+    if (wasDriving) setTimeout(openYandex, 2500);
+  }
+}
+
+async function handle(parts) {
+  if (!apiKey) { openSettings(); return; }
+  setMode("thinking");
+  try {
+    // геолокацию и ответ Gemini ждём одновременно
+    const located = getHere().catch(() => null);
+    const c = await askGemini(parts);
+    await located;
+    await applyCommand(c);
+  } catch (e) {
+    toast(e.message || "Нет связи - проверьте интернет.");
+  }
+  setMode(null);
+}
+
+// ---------- запись голоса (WAV 16 кГц) ----------
+const rec = { ctx: null, stream: null, src: null, proc: null, chunks: [], started: 0, timer: null };
+
+async function startRecording() {
+  speechSynthesis.cancel();
+  // AudioContext создаём сразу в обработчике нажатия - иначе iOS его не запустит
+  rec.ctx = new (window.AudioContext || window.webkitAudioContext)();
+  rec.ctx.resume();
+  try {
+    rec.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+  } catch {
+    rec.ctx.close();
+    toast("Нет доступа к микрофону. Разрешите его в настройках Safari для этого сайта.");
+    return;
+  }
+  rec.src = rec.ctx.createMediaStreamSource(rec.stream);
+  rec.proc = rec.ctx.createScriptProcessor(4096, 1, 1);
+  rec.chunks = [];
+  rec.proc.onaudioprocess = e => rec.chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+  rec.src.connect(rec.proc);
+  rec.proc.connect(rec.ctx.destination);
+  rec.started = Date.now();
+  setMode("listening");
+  rec.timer = setTimeout(stopRecording, 20000);
+}
+
+function stopRecording() {
+  clearTimeout(rec.timer);
+  if (!rec.proc) return;
+  rec.proc.disconnect();
+  rec.src.disconnect();
+  rec.stream.getTracks().forEach(t => t.stop());
+  const sampleRate = rec.ctx.sampleRate;
+  rec.ctx.close();
+  rec.proc = null;
+  if ((Date.now() - rec.started) / 1000 < 0.6) { setMode(null); toast("Слишком коротко - нажмите 🎙, скажите и нажмите ■."); return; }
+  const wav = encodeWav(rec.chunks, sampleRate, 16000);
+  handle([
+    { inlineData: { mimeType: "audio/wav", data: toBase64(wav) } },
+    { text: "Это голосовая команда водителя." }
+  ]);
+}
+
+function encodeWav(chunks, inRate, outRate) {
+  const total = chunks.reduce((n, c) => n + c.length, 0);
+  const input = new Float32Array(total);
+  let off = 0;
+  for (const c of chunks) { input.set(c, off); off += c.length; }
+  const ratio = inRate / outRate;
+  const outLen = Math.floor(total / ratio);
+  const buf = new ArrayBuffer(44 + outLen * 2);
+  const v = new DataView(buf);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, "RIFF"); v.setUint32(4, 36 + outLen * 2, true); w(8, "WAVE");
+  w(12, "fmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, outRate, true); v.setUint32(28, outRate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  w(36, "data"); v.setUint32(40, outLen * 2, true);
+  for (let i = 0; i < outLen; i++) {
+    const start = Math.floor(i * ratio), end = Math.min(Math.floor((i + 1) * ratio), total);
+    let s = 0;
+    for (let j = start; j < end; j++) s += input[j];
+    s = Math.max(-1, Math.min(1, s / Math.max(1, end - start)));
+    v.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return buf;
+}
+
+function toBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+// ---------- кнопки ----------
+let unlocked = false;
+function unlockSpeech() {
+  // iOS разрешает голос только после первого касания
+  if (unlocked) return;
+  unlocked = true;
+  speechSynthesis.speak(new SpeechSynthesisUtterance(""));
+}
+
+$("mic").onclick = () => {
+  unlockSpeech();
+  if (!apiKey) { openSettings(); return; }
+  if (document.body.classList.contains("thinking")) return;
+  if (rec.proc) stopRecording(); else startRecording();
+};
+
+$("kbBtn").onclick = () => {
+  document.body.classList.toggle("typing");
+  if (document.body.classList.contains("typing")) $("typeInput").focus();
+};
+
+$("typeForm").onsubmit = e => {
+  e.preventDefault();
+  unlockSpeech();
+  const text = $("typeInput").value.trim();
+  if (!text || document.body.classList.contains("thinking")) return;
+  $("typeInput").value = "";
+  document.body.classList.remove("typing");
+  handle([{ text: "Команда водителя текстом: " + text }]);
+};
+
+function openSettings() {
+  $("keyInput").value = apiKey;
+  $("settings").showModal();
+}
+$("settingsBtn").onclick = openSettings;
+$("saveBtn").onclick = () => {
+  apiKey = $("keyInput").value.trim();
+  store.set("key", apiKey);
+  $("settings").close();
+};
+
+renderPanel();
+getHere().then(p => { map.setView(p, 14); drawAll(); }).catch(() => {});
+if (trip?.dest) rebuild();
+if (!apiKey) openSettings();
+</script>
+</body>
+</html>
