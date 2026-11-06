@@ -64,6 +64,9 @@
   .trip .meta { color: var(--muted); font-size: 14px; }
   .heard { color: var(--muted); font-size: 14px; font-style: italic; margin-top: 6px; min-height: 0; }
   .heard:empty { display: none; }
+  .note { margin-top: 8px; font-size: 15px; padding: 8px 12px; border-radius: 12px; background: var(--accent-soft); }
+  .note.err { background: var(--avoid-soft); color: var(--avoid); }
+  .note:empty { display: none; }
   #chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
   #chips:empty { display: none; }
   .chip {
@@ -139,6 +142,7 @@
     <div class="meta" id="meta">Нажмите 🎙 и скажите, например: «До Мега Парка через Сатпаева, Абая объедь»</div>
   </div>
   <div class="heard" id="heard"></div>
+  <div class="note" id="note"></div>
   <div id="chips"></div>
   <div class="controls">
     <button class="side" id="kbBtn" aria-label="Написать текстом">Aa</button>
@@ -159,6 +163,9 @@
   <label>Что можно говорить</label>
   <ul>
     <li>«До Мега Парка через Сатпаева»</li>
+    <li>«Сначала в школу на Тимирязева, потом в Форт Горный»</li>
+    <li>«Только не через дворы и узкие улицы»</li>
+    <li>«От дома на Абая 10 до аэропорта» - если не из текущего места</li>
     <li>«Объедь Абая» / «Абая у Байтурсынова ремонт, объедь»</li>
     <li>«Впереди ремонт» / «Тут ямы, объедь»</li>
     <li>«Предложи другой вариант»</li>
@@ -190,17 +197,21 @@ const SYSTEM = `Ты голосовой помощник навигатора в
   "remove_rule" - просит убрать правило ("забудь про Абая", "можно снова по Абая");
   "clear_rules" - сбросить все правила;
   "other" - непонятно или не про маршрут.
-- destination: куда ехать, как поисковый запрос для OpenStreetMap в Алматы (например "Mega Park", "Dostyk Plaza", "аэропорт Алматы", "проспект Абая 150"). Пустая строка, если не назван.
+- destination: конечная точка поездки, как поисковый запрос в Алматы: название места как его пишут (бренды латиницей: "Mega Park", "Dostyk Plaza") или адрес ("проспект Абая 150"). Если водитель назвал и название, и улицу - добавь улицу: "Bright School, улица Тимирязева". Пустая строка, если не назван.
+- stops: места, куда надо заехать ДО конечной точки, по порядку ("сначала в школу, потом в кафе" -> stops=["школа ..."], destination="кафе ..."). Пустой массив, если остановок нет.
+- origin: откуда ехать, только если водитель явно назвал старт не из текущего места ("от дома на Абая 10", "из Мега Парка"). Иначе пустая строка.
 - via: улицы или места, через которые надо проехать. Улицы - полным русским названием как в OpenStreetMap: "улица Сатпаева", "проспект Абая", "проспект Аль-Фараби", "улица Толе би", "проспект Достык", "улица Жандосова", "проспект Райымбека", "Восточная объездная дорога".
 - avoid_streets: улицы, которые надо объехать целиком (тем же форматом).
 - avoid_spots: конкретные места, которые надо объехать (ремонт, яма, авария, неровная дорога в конкретном месте):
   {street, cross, here}. Перекрёсток или участок "Абая у Байтурсынова" -> street="проспект Абая", cross="улица Байтурсынова", here=false.
   "Впереди ремонт", "тут ямы", "здесь пробка", "там неровная дорога" без названия -> street="", cross="", here=true.
 - avoid_unpaved: true, если просит избегать грунтовок/плохих дорог вообще.
+- avoid_small_roads: true, если просит не ехать через дворы, переулки, узкие или маленькие улицы, а ехать по нормальным/большим дорогам.
 - remember: true, если говорит "всегда", "запомни", "постоянно", "никогда не вези через". Иначе false.
 - remove: названия улиц/правил, которые надо убрать (для remove_rule).
 - reply_ru: одно короткое предложение-подтверждение, на "Вы", без лишних слов. Например "Объезжаю Абая, маршрут через Сатпаева."
 
+Если часть просьбы непонятна (например "по той улице, которая потом" без названия) - выполни то, что понятно, а в reply_ru коротко спроси уточнение: "Какую улицу Вы имеете в виду?". Если непонятно ничего - intent "other" и вопрос в reply_ru.
 Учитывай контекст текущей поездки, который придёт в сообщении.`;
 
 const SCHEMA = {
@@ -209,6 +220,8 @@ const SCHEMA = {
     heard: { type: "STRING" },
     intent: { type: "STRING", enum: ["route", "change", "alternative", "remove_rule", "clear_rules", "other"] },
     destination: { type: "STRING" },
+    stops: { type: "ARRAY", items: { type: "STRING" } },
+    origin: { type: "STRING" },
     via: { type: "ARRAY", items: { type: "STRING" } },
     avoid_streets: { type: "ARRAY", items: { type: "STRING" } },
     avoid_spots: {
@@ -220,12 +233,13 @@ const SCHEMA = {
       }
     },
     avoid_unpaved: { type: "BOOLEAN" },
+    avoid_small_roads: { type: "BOOLEAN" },
     remember: { type: "BOOLEAN" },
     remove: { type: "ARRAY", items: { type: "STRING" } },
     reply_ru: { type: "STRING" }
   },
-  required: ["heard", "intent", "destination", "via", "avoid_streets", "avoid_spots", "avoid_unpaved", "remember", "remove", "reply_ru"],
-  propertyOrdering: ["heard", "intent", "destination", "via", "avoid_streets", "avoid_spots", "avoid_unpaved", "remember", "remove", "reply_ru"]
+  required: ["heard", "intent", "destination", "stops", "origin", "via", "avoid_streets", "avoid_spots", "avoid_unpaved", "avoid_small_roads", "remember", "remove", "reply_ru"],
+  propertyOrdering: ["heard", "intent", "destination", "stops", "origin", "via", "avoid_streets", "avoid_spots", "avoid_unpaved", "avoid_small_roads", "remember", "remove", "reply_ru"]
 };
 
 // ---------- хранилище (только на этом устройстве) ----------
@@ -235,9 +249,9 @@ const store = {
 };
 
 let apiKey = store.get("key", "");
-// правило: {id, kind:'street'|'spot'|'via'|'unpaved', label, permanent, lat?, lon?, street?, lines?}
+// правило: {id, kind:'street'|'spot'|'via'|'unpaved'|'small', label, permanent, lat?, lon?, street?, lines?}
 let rules = store.get("nav_rules", []);
-// поездка: {dest:{name,lat,lon}, handedOff, alt}
+// поездка: {origin?:{name,lat,lon}, stops:[{name,lat,lon}], dest:{name,lat,lon,address}, handedOff, alt}
 let trip = store.get("nav_trip", null);
 let route = null;        // {shape:[[lat,lon]], km, min, yandexVias:[[lat,lon]]}
 let here = null;         // [lat, lon]
@@ -253,6 +267,12 @@ function setMode(mode) {
   document.body.classList.remove("listening", "thinking");
   if (mode) document.body.classList.add(mode);
   $("mic").textContent = mode === "listening" ? "■" : "🎙";
+}
+
+// сообщение на панели - остаётся, пока не придёт следующее
+function note(text, isError) {
+  $("note").textContent = text || "";
+  $("note").className = "note" + (isError ? " err" : "");
 }
 
 function toast(text) {
@@ -290,22 +310,24 @@ function drawAll() {
     if (r.kind === "via") L.circleMarker([r.lat, r.lon], { radius: 7, color: "#16a34a", weight: 3, fillColor: "#fff", fillOpacity: 1 }).addTo(layer);
   }
   if (route) L.polyline(route.shape, { color: "#2563eb", weight: 6, opacity: .85 }).addTo(layer);
+  for (const st of trip?.stops || []) L.circleMarker([st.lat, st.lon], { radius: 9, color: "#2563eb", weight: 3, fillColor: "#fff", fillOpacity: 1 }).addTo(layer);
   if (trip?.dest) L.marker([trip.dest.lat, trip.dest.lon]).addTo(layer);
   if (route) map.fitBounds(L.latLngBounds(route.shape).pad(0.15));
 }
 
 function renderPanel() {
-  $("destName").textContent = trip?.dest?.name || "Куда едем?";
+  const stops = (trip?.stops || []).map(st => st.name);
+  $("destName").textContent = trip?.dest ? [...stops, trip.dest.name].join(" → ") : "Куда едем?";
   $("meta").textContent = route
     ? `${route.min} мин · ${route.km} км без учёта пробок - точное время покажет Яндекс`
-    : trip?.dest ? "Строю маршрут…" : "Нажмите 🎙 и скажите, например: «До Мега Парка через Сатпаева, Абая объедь»";
+    : trip?.dest ? (building ? "Строю маршрут…" : "Маршрут не построен") : "Нажмите 🎙 и скажите, например: «До Мега Парка через Сатпаева, Абая объедь»";
   $("goBtn").disabled = !route;
 
   const box = $("chips");
   box.innerHTML = "";
   for (const r of rules) {
     const b = document.createElement("button");
-    b.className = "chip " + (r.kind === "via" ? "via" : r.kind === "unpaved" ? "opt" : "avoid");
+    b.className = "chip " + (r.kind === "via" ? "via" : r.kind === "unpaved" || r.kind === "small" ? "opt" : "avoid");
     const label = document.createElement("span");
     label.textContent = r.label;
     b.append(label);
@@ -379,11 +401,40 @@ async function nominatim(q, extra) {
   return res.json();
 }
 
+// неточный поиск принимаем, только если совпало отличительное слово названия:
+// «International Bright School» не должна превратиться в «Kazakhstan International School»
+const GENERIC = /^(international|school|cafe|coffee|restaurant|center|centre|plaza|park|city|almaty|school|kids|club|улица|проспект|школа|кафе|ресторан|центр|тц|трц|трк|бц|детский|сад|международная|алматы)$/i;
+function sameName(query, name) {
+  const words = t => t.toLowerCase().split(/[^a-zа-яёәіңғүұқөһ0-9]+/i).filter(w => w.length >= 3 && !GENERIC.test(w));
+  const q = words(query), n = words(name);
+  if (!q.length) return true;
+  return q.some(w => n.some(x => x.startsWith(w.slice(0, 5)) || w.startsWith(x.slice(0, 5))));
+}
+
 async function findPlace(q) {
-  const list = await nominatim(q, "&limit=1");
-  if (!list.length) throw new Error(`Не нашла «${q}» в Алматы. Скажите иначе, например с улицей.`);
-  const x = list[0];
-  return { name: x.name || q, lat: +x.lat, lon: +x.lon };
+  // 1) OpenStreetMap
+  const list = await nominatim(q, "&limit=1&addressdetails=1").catch(() => []);
+  if (list.length) {
+    const x = list[0], a = x.address || {};
+    return { name: x.name || q, lat: +x.lat, lon: +x.lon, address: [a.road, a.house_number].filter(Boolean).join(" ") };
+  }
+  // 2) Photon - тот же OpenStreetMap, но прощает неточные названия
+  try {
+    const res = await fetch(`https://photon.komoot.io/api/?limit=1&lat=${ALMATY[0]}&lon=${ALMATY[1]}&bbox=76.70,43.03,77.20,43.42&q=${encodeURIComponent(q)}`);
+    const f = (await res.json()).features?.[0];
+    if (f && sameName(q, f.properties.name || "")) {
+      const pr = f.properties;
+      return { name: pr.name || q, lat: f.geometry.coordinates[1], lon: f.geometry.coordinates[0], address: [pr.street, pr.housenumber].filter(Boolean).join(" ") };
+    }
+  } catch {}
+  // 3) места нет на бесплатной карте - ищем адрес через поиск Google и находим адрес на карте
+  const g = await geminiFind(q).catch(() => null);
+  if (g?.address) {
+    const byAddr = await nominatim(g.address, "&limit=1").catch(() => []);
+    if (byAddr.length) return { name: g.name || q, lat: +byAddr[0].lat, lon: +byAddr[0].lon, address: g.address };
+  }
+  if (g && g.lat > 43.03 && g.lat < 43.42 && g.lon > 76.70 && g.lon < 77.20) return { name: g.name || q, lat: g.lat, lon: g.lon, address: g.address || "" };
+  throw new Error(`Не нашла «${q}» в Алматы. Скажите адрес или улицу рядом.`);
 }
 
 const streetCache = {};
@@ -454,22 +505,47 @@ async function valhalla(body) {
 }
 
 async function buildRoute() {
-  const from = await getHere();
+  let from;
+  if (trip.origin) from = [trip.origin.lat, trip.origin.lon];
+  else {
+    try { from = await getHere(); }
+    catch { throw new Error("Не вижу, где Вы. Разрешите геолокацию для этого сайта или скажите, откуда едем: «от Абая 10 до …»."); }
+  }
   const dest = [trip.dest.lat, trip.dest.lon];
+  const stops = (trip.stops || []).map(st => [st.lat, st.lon]);
+  const ends = [from, ...stops, dest];
+  const nearEnd = p => ends.some(e => dist(p, e) < 150);
 
+  // каждую «через» относим к тому отрезку поездки (старт - остановка - … - финиш), к которому она ближе,
+  // и внутри отрезка проезжаем по порядку
   const vias = rules.filter(r => r.kind === "via").map(r => [r.lat, r.lon]);
-  // проезжаем промежуточные точки по порядку от старта к финишу
-  vias.sort((a, b) => dist(from, a) - dist(from, b));
+  const legs = ends.slice(1).map(() => []);
+  for (const v of vias) {
+    let bi = 0, bd = Infinity;
+    for (let i = 0; i < ends.length - 1; i++) { const d = distToSegment(v, ends[i], ends[i + 1]); if (d < bd) { bd = d; bi = i; } }
+    legs[bi].push(v);
+  }
+  const locations = [{ lat: from[0], lon: from[1] }];
+  legs.forEach((leg, i) => {
+    leg.sort((a, b) => dist(ends[i], a) - dist(ends[i], b));
+    for (const v of leg) locations.push({ lat: v[0], lon: v[1], type: "through" });
+    const e = ends[i + 1];
+    locations.push({ lat: e[0], lon: e[1], type: "break" });
+  });
 
-  const spots = rules.filter(r => r.kind === "spot").map(r => [r.lat, r.lon])
-    .filter(p => dist(p, from) > 150 && dist(p, dest) > 150);
+  const spots = rules.filter(r => r.kind === "spot").map(r => [r.lat, r.lon]).filter(p => !nearEnd(p));
   const streets = rules.filter(r => r.kind === "street");
   const unpaved = rules.some(r => r.kind === "unpaved");
+  const small = rules.some(r => r.kind === "small");
+
+  const auto = { exclude_unpaved: unpaved };
+  // «не через дворы и узкие улицы»: жилые зоны и служебные проезды - только если иначе никак
+  if (small) Object.assign(auto, { use_living_streets: 0, service_penalty: 500, service_factor: 5 });
 
   const body = {
-    locations: [{ lat: from[0], lon: from[1] }, ...vias.map(p => ({ lat: p[0], lon: p[1], type: "through" })), { lat: dest[0], lon: dest[1] }],
+    locations,
     costing: "auto",
-    costing_options: { auto: { exclude_unpaved: unpaved } },
+    costing_options: { auto },
     exclude_polygons: spots.map(p => boxAround(p, 110)),
     exclude_locations: [],
     alternates: 2
@@ -489,7 +565,7 @@ async function buildRoute() {
     const all = data.trip.legs.flatMap(l => decodeShape(l.shape));
     let added = 0;
     for (const s of streets) {
-      const onStreet = all.filter((p, i) => i > 0 && distToLines(p, s.lines) < 20 && dist(p, from) > 150 && dist(p, dest) > 150);
+      const onStreet = all.filter((p, i) => i > 0 && distToLines(p, s.lines) < 20 && !nearEnd(p));
       for (let i = 0; i < onStreet.length; i += 3) {
         const p = onStreet[i], idx = all.indexOf(p), q = all[Math.min(idx + 1, all.length - 1)];
         body.exclude_locations.push({ lat: p[0], lon: p[1], heading: bearing(all[idx - 1] || p, q), heading_tolerance: 35 });
@@ -511,19 +587,21 @@ async function buildRoute() {
   // точки для Яндекса: через что проехать + по одной точке на каждом объезде,
   // чтобы Яндекс не повёл обратно через ремонт
   const yv = vias.map(p => ({ p, i: nearestIndex(shape, p) }));
+  const must = stops.map(p => ({ p, i: nearestIndex(shape, p), stop: true }));
   for (const a of detourAnchors) {
     let bi = -1, bd = Infinity;
     shape.forEach((p, i) => { const d = dist(p, a); if (d > 160 && d < bd) { bd = d; bi = i; } });
     if (bi >= 0) yv.push({ p: shape[bi], i: bi });
   }
   if (trip.alt && options.length > 1) for (const f of [0.35, 0.65]) { const i = Math.floor(shape.length * f); yv.push({ p: shape[i], i }); }
-  yv.sort((a, b) => a.i - b.i);
+  // остановки обязательны, остальных точек - сколько поместится
+  const picked = [...must, ...yv.slice(0, Math.max(0, 7 - must.length))].sort((a, b) => a.i - b.i);
 
   route = {
     shape,
     km: (chosen.summary.length).toFixed(1),
     min: Math.round(chosen.summary.time / 60),
-    yandexVias: yv.slice(0, 6).map(v => v.p)
+    yandexVias: picked.map(v => v.p)
   };
 }
 
@@ -533,16 +611,19 @@ function nearestIndex(shape, p) {
   return bi;
 }
 
+let building = false;
 async function rebuild() {
   save();
   if (!trip?.dest) { route = null; renderPanel(); drawAll(); return; }
   route = null;
+  building = true;
   renderPanel();
   try {
     await buildRoute();
   } catch (e) {
-    toast(e.message);
+    note(e.message, true);
   }
+  building = false;
   renderPanel();
   drawAll();
 }
@@ -554,7 +635,8 @@ function openYandex() {
   save();
   const pts = [...route.yandexVias, [trip.dest.lat, trip.dest.lon]].map(p => p[0].toFixed(6) + "," + p[1].toFixed(6));
   // пустая первая точка = «от моего местоположения»
-  const rtext = encodeURIComponent("~" + pts.join("~")).replace(/%2C/g, ",");
+  const start = trip.origin ? trip.origin.lat.toFixed(6) + "," + trip.origin.lon.toFixed(6) : "";
+  const rtext = encodeURIComponent(start + "~" + pts.join("~")).replace(/%2C/g, ",");
   const app = `yandexmaps://maps.yandex.ru/?rtext=${rtext}&rtt=auto`;
   const web = `https://yandex.kz/maps/?rtext=${rtext}&rtt=auto`;
   const fallback = setTimeout(() => { if (!document.hidden) location.href = web; }, 1500);
@@ -567,6 +649,7 @@ $("goBtn").onclick = openYandex;
 async function askGemini(parts) {
   const context = {
     current_destination: trip?.dest?.name || null,
+    stops: (trip?.stops || []).map(st => st.name),
     active_rules: rules.map(r => (r.permanent ? "[всегда] " : "") + r.label)
   };
   const body = JSON.stringify({
@@ -574,6 +657,21 @@ async function askGemini(parts) {
     contents: [{ role: "user", parts: [{ text: "Контекст поездки: " + JSON.stringify(context) }, ...parts] }],
     generationConfig: { responseMimeType: "application/json", responseSchema: SCHEMA, temperature: 0.2 }
   });
+  return JSON.parse(await geminiText(body));
+}
+
+async function geminiFind(q) {
+  const body = JSON.stringify({
+    contents: [{ role: "user", parts: [{ text: `Найди в интернете место в Алматы: "${q}". Ответь только одной строкой JSON без пояснений: {"name": "название", "address": "улица и номер дома в Алматы, по-русски", "lat": широта, "lon": долгота}. Если не нашла - {"name": ""}.` }] }],
+    tools: [{ google_search: {} }]
+  });
+  const text = await geminiText(body);
+  const m = text.match(/\{[\s\S]*\}/);
+  const g = m ? JSON.parse(m[0]) : null;
+  return g && g.name ? g : null;
+}
+
+async function geminiText(body) {
   // при перегрузке (503) или лимите (429) пробуем другую модель - у каждой свой бесплатный лимит;
   // начинаем с той, что сработала в прошлый раз
   const last = store.get("model", MODELS[0]);
@@ -598,7 +696,7 @@ async function askGemini(parts) {
       const text = (data.candidates?.[0]?.content?.parts || []).filter(p => !p.thought).map(p => p.text || "").join("");
       if (!text) continue;
       store.set("model", model);
-      return JSON.parse(text);
+      return text;
     }
   }
   if (limited && !busy) throw new Error("Бесплатный лимит Gemini на сегодня исчерпан. Попробуйте позже или завтра.");
@@ -609,7 +707,12 @@ const newId = () => Math.random().toString(36).slice(2, 9);
 
 async function applyCommand(c) {
   $("heard").textContent = c.heard ? "«" + c.heard + "»" : "";
-  if (c.intent === "other") { sayRu(c.reply_ru || "Не поняла, повторите, пожалуйста."); return; }
+  if (c.intent === "other") {
+    note(c.reply_ru || "Не поняла, повторите, пожалуйста.");
+    sayRu(c.reply_ru || "Не поняла, повторите, пожалуйста.");
+    return;
+  }
+  note("Ищу места на карте…");
 
   if (c.intent === "clear_rules") rules = [];
   if (c.intent === "remove_rule") {
@@ -620,7 +723,15 @@ async function applyCommand(c) {
   if (c.intent === "route") {
     // новая поездка: временные правила прошлой поездки больше не нужны
     rules = rules.filter(r => r.permanent);
-    trip = { dest: await findPlace(c.destination), alt: 0, handedOff: false };
+    const stops = [];
+    for (const st of c.stops || []) stops.push(await findPlace(st));
+    trip = {
+      origin: c.origin ? await findPlace(c.origin) : null,
+      stops,
+      dest: await findPlace(c.destination),
+      alt: 0,
+      handedOff: false
+    };
   } else if (c.destination && trip) {
     trip.dest = await findPlace(c.destination);
   }
@@ -660,13 +771,20 @@ async function applyCommand(c) {
     }
     rules.push({ id: newId(), kind: "spot", label, lat: p[0], lon: p[1], permanent });
   }
+  if (c.avoid_small_roads && !rules.some(r => r.kind === "small")) {
+    rules.push({ id: newId(), kind: "small", label: "без дворов и узких улиц", permanent });
+  }
   if (c.avoid_unpaved && !rules.some(r => r.kind === "unpaved")) {
     rules.push({ id: newId(), kind: "unpaved", label: "без грунтовок", permanent });
   }
 
   const wasDriving = trip?.handedOff;
+  note("");
   await rebuild();
   if (route) {
+    // показываем, что именно нашлось, - чтобы было видно, если навигатор понял не то место
+    const found = [...(trip.stops || []), trip.dest].map(pl => pl.name + (pl.address ? ` (${pl.address})` : "")).join(" → ");
+    note((c.reply_ru ? c.reply_ru + " " : "") + "Нашла: " + found);
     sayRu(c.reply_ru);
     // если уже едем - сразу возвращаемся в Яндекс с новым маршрутом
     if (wasDriving) setTimeout(openYandex, 2500);
@@ -683,7 +801,7 @@ async function handle(parts) {
     await located;
     await applyCommand(c);
   } catch (e) {
-    toast(e.message || "Нет связи - проверьте интернет.");
+    note(e.message || "Нет связи - проверьте интернет.", true);
   }
   setMode(null);
 }
@@ -805,7 +923,7 @@ $("saveBtn").onclick = () => {
 };
 
 renderPanel();
-getHere().then(p => { map.setView(p, 14); drawAll(); }).catch(() => {});
+getHere().then(p => { map.setView(p, 14); drawAll(); }).catch(() => note("Не вижу, где Вы. Разрешите геолокацию для этого сайта - или называйте старт голосом: «от Абая 10 до …».", true));
 if (trip?.dest) rebuild();
 if (!apiKey) openSettings();
 </script>
