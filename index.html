@@ -110,6 +110,7 @@
     border: 0; border-radius: 18px; padding: 20px; width: min(420px, calc(100vw - 32px));
     background: var(--card); color: var(--text);
   }
+  .share-btn { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; }
   dialog::backdrop { background: rgba(0,0,0,.4); }
   dialog h2 { margin: 0 0 12px; font-size: 20px; }
   dialog label { display: block; font-size: 14px; color: var(--muted); margin: 14px 0 6px; }
@@ -177,6 +178,9 @@
   </ul>
   <label>Запомненные места</label>
   <div id="placesList" class="small">Пока нет. Скажите место с адресом - навигатор запомнит.</div>
+  <label>Поделиться с близким</label>
+  <button id="shareBtn" type="button" class="share-btn">Скопировать ссылку с моим ключом</button>
+  <div class="small" id="shareInfo">Отправляйте только тому, кому доверяете: бесплатные лимиты станут общими. Свои слова, места и настройки у него будут отдельные.</div>
   <div class="row">
     <button id="saveBtn" type="button" class="primary">Готово</button>
   </div>
@@ -187,7 +191,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>
 // ---------- обновление: телефон может держать старую копию приложения ----------
-const VERSION = "2026-11-09b";
+const VERSION = "2026-11-10";
 fetch(location.pathname + "?check=" + Date.now(), { cache: "no-store" })
   .then(r => r.text())
   .then(t => {
@@ -277,6 +281,14 @@ const store = {
 };
 
 let apiKey = store.get("key", "");
+// личная ссылка «с ключом»: ключ в части после #, она не уходит на сервер и не попадает на GitHub
+(function keyFromLink() {
+  const m = location.hash.match(/[#&]k=([\w-]+)/);
+  if (!m) return;
+  apiKey = m[1];
+  store.set("key", apiKey);
+  window.history.replaceState(null, "", location.pathname);
+})();
 // правило: {id, kind:'street'|'spot'|'via'|'unpaved'|'small', label, permanent, lat?, lon?, street?, lines?}
 let rules = store.get("nav_rules", []);
 // поездка: {origin?:{name,lat,lon}, stops:[{name,lat,lon}], dest:{name,lat,lon,address}, handedOff, alt}
@@ -1093,6 +1105,17 @@ function openSettings() {
   $("settings").showModal();
 }
 $("settingsBtn").onclick = openSettings;
+$("shareBtn").onclick = async () => {
+  const key = $("keyInput").value.trim() || apiKey;
+  if (!key) { $("shareInfo").textContent = "Сначала вставьте свой ключ выше."; return; }
+  const link = location.origin + location.pathname + "#k=" + key;
+  try {
+    await navigator.clipboard.writeText(link);
+    $("shareInfo").textContent = "Ссылка скопирована - отправьте её в мессенджере. Открыв её, человек сразу сможет пользоваться приложением.";
+  } catch {
+    $("shareInfo").textContent = link;
+  }
+};
 $("saveBtn").onclick = () => {
   apiKey = $("keyInput").value.trim();
   store.set("key", apiKey);
