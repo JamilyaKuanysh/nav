@@ -10,6 +10,7 @@
 <link rel="apple-touch-icon" href="icon-180.png">
 <link rel="manifest" href="manifest.json">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
 <title>Маршрут</title>
 <style>
   :root {
@@ -181,6 +182,8 @@
   <div id="placesList" class="small">Пока нет. Скажите место с адресом - навигатор запомнит.</div>
   <label>Поделиться с близким</label>
   <button id="shareBtn" type="button" class="share-btn">Скопировать ссылку с моим ключом</button>
+  <button id="qrBtn" type="button" class="share-btn" style="margin-top:8px">Показать QR-код с моим ключом</button>
+  <div id="qrBox" style="text-align:center; margin-top:10px"></div>
   <div class="small" id="shareInfo">Отправляйте только тому, кому доверяете: бесплатные лимиты станут общими. Свои слова, места и настройки у него будут отдельные.</div>
   <div class="row">
     <button id="saveBtn" type="button" class="primary">Готово</button>
@@ -192,12 +195,12 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>
 // ---------- обновление: телефон может держать старую копию приложения ----------
-const VERSION = "2026-11-10c";
+const VERSION = "2026-11-10d";
 fetch(location.pathname + "?check=" + Date.now(), { cache: "no-store" })
   .then(r => r.text())
   .then(t => {
     const m = t.match(/const VERSION = "([^"]+)"/);
-    if (m && m[1] !== VERSION) location.replace(location.pathname + "?v=" + m[1]);
+    if (m && m[1] !== VERSION) location.replace(location.pathname + "?v=" + m[1] + location.hash);
   })
   .catch(() => {});
 
@@ -1133,11 +1136,34 @@ function openSettings() {
   $("settings").showModal();
 }
 $("settingsBtn").onclick = openSettings;
+function shareLink(key) {
+  const hex = [...key].map(c => c.charCodeAt(0).toString(16).padStart(2, "0")).join("");
+  return location.origin + location.pathname + "#h=" + hex + keySum(key);
+}
+
+// QR-код: наводят камеру iPhone - ссылка открывается сразу в Safari, мимо мессенджеров
+$("qrBtn").onclick = () => {
+  const key = $("keyInput").value.trim() || apiKey;
+  if (!key) { $("shareInfo").textContent = "Сначала вставьте свой ключ выше."; return; }
+  try {
+    const qr = qrcode(0, "M");
+    qr.addData(shareLink(key));
+    qr.make();
+    $("qrBox").innerHTML = qr.createSvgTag({ cellSize: 5, margin: 3, scalable: true });
+    const svg = $("qrBox").querySelector("svg");
+    svg.style.width = "220px";
+    svg.style.height = "220px";
+    svg.style.background = "#fff";
+    $("shareInfo").textContent = "Пусть наведёт камеру iPhone на этот код и нажмёт на появившуюся ссылку. Приложение откроется с Вашим ключом.";
+  } catch {
+    $("shareInfo").textContent = "QR-код не получился - скопируйте ссылку кнопкой выше.";
+  }
+};
+
 $("shareBtn").onclick = async () => {
   const key = $("keyInput").value.trim() || apiKey;
   if (!key) { $("shareInfo").textContent = "Сначала вставьте свой ключ выше."; return; }
-  const hex = [...key].map(c => c.charCodeAt(0).toString(16).padStart(2, "0")).join("");
-  const link = location.origin + location.pathname + "#h=" + hex + keySum(key);
+  const link = shareLink(key);
   try {
     await navigator.clipboard.writeText(link);
     $("shareInfo").textContent = "Ссылка скопирована - отправьте её в мессенджере. Открыв её, человек сразу сможет пользоваться приложением.";
