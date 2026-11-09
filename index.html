@@ -195,7 +195,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>
 // ---------- обновление: телефон может держать старую копию приложения ----------
-const VERSION = "2026-11-10d";
+const VERSION = "2026-11-10e";
 fetch(location.pathname + "?check=" + Date.now(), { cache: "no-store" })
   .then(r => r.text())
   .then(t => {
@@ -800,7 +800,7 @@ async function askGemini(parts) {
   const body = JSON.stringify({
     systemInstruction: { parts: [{ text: SYSTEM }] },
     contents: [{ role: "user", parts: [{ text: "Контекст поездки: " + JSON.stringify(context) }, ...parts] }],
-    generationConfig: { responseMimeType: "application/json", responseSchema: SCHEMA, temperature: 0.2 }
+    generationConfig: { responseMimeType: "application/json", responseSchema: SCHEMA, temperature: 0.2, thinkingConfig: { thinkingLevel: "low" } }
   });
   return JSON.parse(await geminiText(body));
 }
@@ -816,7 +816,8 @@ async function geminiFind(q) {
       const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-        body
+        body,
+        signal: AbortSignal.timeout ? AbortSignal.timeout(20000) : undefined
       });
       if (!res.ok) { lastError = "поиск Google: ошибка " + res.status; continue; }
       const data = await res.json();
@@ -838,14 +839,31 @@ async function geminiText(body) {
   const last = store.get("model", MODELS[0]);
   const order = [last, ...MODELS.filter(m => m !== last)];
   let busy = false, limited = false;
+  const started = Date.now();
+  const post = (model, b) => fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+    body: b,
+    signal: AbortSignal.timeout ? AbortSignal.timeout(25000) : undefined
+  });
   for (let attempt = 0; attempt < 2; attempt++) {
     if (attempt) await new Promise(r => setTimeout(r, 2500));
     for (const model of order) {
-      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-        body
-      });
+      // не заставляем ждать вечно: через минуту честно говорим, что Google не отвечает
+      if (Date.now() - started > 60000) throw new Error("Google слишком долго не отвечает - попробуйте ещё раз через минуту.");
+      let res;
+      try {
+        res = await post(model, body);
+        // старые модели не знают настройку «думать поменьше» - повторяем без неё
+        if (res.status === 400 && /thinking/i.test(await res.clone().text())) {
+          const b = JSON.parse(body);
+          delete b.generationConfig.thinkingConfig;
+          res = await post(model, JSON.stringify(b));
+        }
+      } catch {
+        busy = true;   // не ответила за 25 секунд или пропала связь - пробуем следующую модель
+        continue;
+      }
       if (res.status === 404 || res.status >= 500) { busy = busy || res.status >= 500; continue; }
       if (res.status === 429) { limited = true; continue; }
       if (!res.ok) {
