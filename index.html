@@ -159,7 +159,14 @@
 
 <dialog id="settings">
   <h2>Настройки</h2>
-  <label for="keyInput">Ключ Gemini API</label>
+  <label for="claudeKeyInput">Ключ Claude</label>
+  <input id="claudeKeyInput" type="password" autocomplete="off" placeholder="sk-ant-…">
+  <div class="small" id="claudeKeyInfo"></div>
+  <label for="claudeModelSelect">Модель Claude</label>
+  <select id="claudeModelSelect"></select>
+  <div class="small">Платно, с оплатой заранее: <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a> → API Keys. Если ключа Claude нет, отвечает бесплатный Gemini.</div>
+
+  <label for="keyInput">Ключ Gemini - не нужен, если есть ключ Claude</label>
   <input id="keyInput" type="password" autocomplete="off" placeholder="AIza…">
   <div class="small" id="keyInfo"></div>
   <div class="small">Тот же ключ, что и для Mia. Бесплатно: <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>. Хранится только на этом телефоне.</div>
@@ -195,7 +202,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>
 // ---------- обновление: телефон может держать старую копию приложения ----------
-const VERSION = "2026-11-10e";
+const VERSION = "2026-11-10h";
 fetch(location.pathname + "?check=" + Date.now(), { cache: "no-store" })
   .then(r => r.text())
   .then(t => {
@@ -285,6 +292,8 @@ const store = {
 };
 
 let apiKey = store.get("key", "");
+let claudeKey = store.get("claude_key", "");
+let claudeModel = store.get("claude_model", "claude-opus-5-5");
 // личная ссылка «с ключом»: ключ после #, эта часть не уходит на сервер и не попадает на GitHub.
 // Ключ записан только цифрами и буквами a-f с контрольной суммой: мессенджеры не могут его испортить
 // (Telegram, например, съедает «_» как разметку курсива)
@@ -295,18 +304,21 @@ function keySum(t) {
   return (h & 0xffff).toString(16).padStart(4, "0");
 }
 (function keyFromLink() {
-  const hex = location.hash.match(/[#&]h=([0-9a-fA-F]+)/);
+  const packed = location.hash.match(/[#&][jh]=([0-9a-fA-F]+)/);
   const raw = location.hash.match(/[#&]k=([\w-]+)/);
-  if (!hex && !raw) return;
+  if (!packed && !raw) return;
   window.history.replaceState(null, "", location.pathname);
-  let key = raw ? raw[1] : "";
-  if (hex) {
-    const h = hex[1].toLowerCase();
-    key = (h.slice(0, -4).match(/../g) || []).map(b => String.fromCharCode(parseInt(b, 16))).join("");
-    if (keySum(key) !== h.slice(-4)) { linkKey = "Ссылка повредилась при пересылке - попросите прислать её ещё раз."; return; }
+  let keys = raw ? { g: raw[1] } : null;
+  if (packed) {
+    const h = packed[1].toLowerCase();
+    const text = (h.slice(0, -4).match(/../g) || []).map(b => String.fromCharCode(parseInt(b, 16))).join("");
+    if (keySum(text) !== h.slice(-4)) { linkKey = "Ссылка повредилась при пересылке - попросите прислать её ещё раз."; return; }
+    // #j= - ключи Gemini и Claude вместе, #h= - старая ссылка только с ключом Gemini
+    keys = packed[0].includes("j=") ? JSON.parse(text) : { g: text };
   }
-  apiKey = key;
-  store.set("key", apiKey);
+  if (keys.g) { apiKey = keys.g; store.set("key", apiKey); }
+  if (keys.c) { claudeKey = keys.c; store.set("claude_key", claudeKey); }
+  if (keys.m) { claudeModel = keys.m; store.set("claude_model", claudeModel); }
   linkKey = "ok";
 })();
 // правило: {id, kind:'street'|'spot'|'via'|'unpaved'|'small', label, permanent, lat?, lon?, street?, lines?}
@@ -484,27 +496,41 @@ function sameName(query, name) {
 const inAlmaty = (lat, lon) => lat > 43.03 && lat < 43.42 && lon > 76.70 && lon < 77.20;
 
 // поиск по бесплатной карте OpenStreetMap: сначала точный, потом неточный (Photon)
-async function osmFind(q) {
+// поиск по бесплатной карте OpenStreetMap. Одинаковых названий в городе бывает несколько
+// (две улицы Ракишева) - выбираем ближайшее к остальной поездке или к местам, где человек обычно бывает
+async function osmFind(q, hint) {
   const hasNumber = /\d/.test(q);
-  let streetOnly = null;
-  const list = await nominatim(q, "&limit=1&addressdetails=1").catch(() => []);
-  const x = list[0], a = x?.address || {};
-  if (x && sameName(q, [x.name, a.road, a.house_number].filter(Boolean).join(" "))) {
+  const cands = [];
+  const list = await nominatim(q, "&limit=5&addressdetails=1").catch(() => []);
+  for (const x of list) {
+    const a = x.address || {};
+    if (!sameName(q, [x.name, a.road, a.house_number].filter(Boolean).join(" "))) continue;
     const pl = { name: x.name || q, lat: +x.lat, lon: +x.lon, address: [a.road, a.house_number].filter(Boolean).join(" ") };
-    if (!hasNumber || a.house_number) return pl;
-    streetOnly = { ...pl, name: q, approx: true };   // дом не нашёлся, только улица
+    cands.push(!hasNumber || a.house_number ? pl : { ...pl, name: q, approx: true });   // approx - дом не нашёлся, только улица
   }
   try {
-    const res = await fetch(`https://photon.komoot.io/api/?limit=3&lat=${ALMATY[0]}&lon=${ALMATY[1]}&bbox=76.70,43.03,77.20,43.42&q=${encodeURIComponent(q)}`);
+    const res = await fetch(`https://photon.komoot.io/api/?lang=default&limit=5&lat=${ALMATY[0]}&lon=${ALMATY[1]}&bbox=76.70,43.03,77.20,43.42&q=${encodeURIComponent(q)}`);
     for (const f of (await res.json()).features || []) {
       const pr = f.properties;
-      const full = [pr.name, pr.street, pr.housenumber].filter(Boolean).join(" ");
-      if (!sameName(q, full)) continue;
-      if (hasNumber && !pr.housenumber && streetOnly) continue;
-      return { name: pr.name || q, lat: f.geometry.coordinates[1], lon: f.geometry.coordinates[0], address: [pr.street, pr.housenumber].filter(Boolean).join(" ") };
+      if (!sameName(q, [pr.name, pr.street, pr.housenumber].filter(Boolean).join(" "))) continue;
+      const pl = { name: pr.name || q, lat: f.geometry.coordinates[1], lon: f.geometry.coordinates[0], address: [pr.street, pr.housenumber].filter(Boolean).join(" ") };
+      cands.push(hasNumber && !pr.housenumber ? { ...pl, approx: true } : pl);
     }
   } catch {}
-  return streetOnly;
+  if (!cands.length) return null;
+  const exact = cands.filter(c => !c.approx);
+  const pool = exact.length ? exact : cands;
+  const near = hint || placeHint();
+  pool.sort((a, b) => dist([a.lat, a.lon], near) - dist([b.lat, b.lon], near));
+  return pool[0];
+}
+
+// откуда считать «ближе»: где человек сейчас, иначе середина его привычных мест, иначе центр города
+function placeHint() {
+  if (here) return here;
+  const known = places.filter(pl => !pl.approx);
+  if (known.length) return [known.reduce((s, pl) => s + pl.lat, 0) / known.length, known.reduce((s, pl) => s + pl.lon, 0) / known.length];
+  return ALMATY;
 }
 
 function savedPlace(name) {
@@ -519,7 +545,7 @@ function rememberPlace(pl) {
 }
 
 // spec: {name, address} от Gemini
-async function findPlace(spec) {
+async function findPlace(spec, hint) {
   const name = (spec.name || spec.address || "").trim();
   const address = (spec.address || "").trim();
   if (!name) throw new Error("Не поняла, куда ехать. Повторите, пожалуйста.");
@@ -537,7 +563,7 @@ async function findPlace(spec) {
   }
   // 1) адрес назван - ищем по адресу и запоминаем место под этим названием
   if (address) {
-    const pl = await osmFind(address);
+    const pl = await osmFind(address, hint);
     if (pl) {
       const found = { ...pl, name, address: pl.address || address };
       if (name !== address) rememberPlace(found);
@@ -548,13 +574,13 @@ async function findPlace(spec) {
   const saved = savedPlace(name);
   if (saved) return saved;
   // 3) бесплатная карта
-  const pl = await osmFind(name);
+  const pl = await osmFind(name, hint);
   if (pl && !pl.approx) return pl;
   // 4) места нет на карте - ищем адрес через поиск Google
   let why = "";
-  const g = await geminiFind(name).catch(e => { why = e.message; return null; });
+  const g = await webFind(name).catch(e => { why = e.message; return null; });
   if (g?.address) {
-    const byAddr = await osmFind(g.address);
+    const byAddr = await osmFind(g.address, hint);
     if (byAddr) {
       const found = { ...byAddr, name: g.name || name, address: g.address };
       rememberPlace(found);
@@ -790,13 +816,17 @@ function geminiError(status, text) {
   return "Ошибка Gemini " + status + ". [" + reason + "]";
 }
 
-async function askGemini(parts) {
-  const context = {
+function tripContext() {
+  return {
     current_destination: trip?.dest?.name || null,
     stops: (trip?.stops || []).map(st => st.name),
     known_places: places.map(pl => pl.name + (pl.alias ? " (" + pl.alias + ")" : "")),
     active_rules: rules.map(r => (r.permanent ? "[всегда] " : "") + r.label)
   };
+}
+
+async function askGemini(parts) {
+  const context = tripContext();
   const body = JSON.stringify({
     systemInstruction: { parts: [{ text: SYSTEM }] },
     contents: [{ role: "user", parts: [{ text: "Контекст поездки: " + JSON.stringify(context) }, ...parts] }],
@@ -914,11 +944,14 @@ async function applyCommand(c) {
     // новая поездка: временные правила прошлой поездки больше не нужны
     rules = rules.filter(r => r.permanent);
     const stops = [];
-    for (const st of c.stops || []) stops.push(await findPlace(st));
+    for (const st of c.stops || []) stops.push(await findPlace(st, stops.length ? [stops.at(-1).lat, stops.at(-1).lon] : undefined));
+    const near = stops.length ? [stops.at(-1).lat, stops.at(-1).lon] : undefined;
+    const dest = await findPlace(c.destination, near);
+    const first = stops[0] || dest;
     trip = {
-      origin: c.origin?.name || c.origin?.address ? await findPlace(c.origin) : null,
+      origin: c.origin?.name || c.origin?.address ? await findPlace(c.origin, [first.lat, first.lon]) : null,
       stops,
-      dest: await findPlace(c.destination),
+      dest,
       alt: 0,
       handedOff: false
     };
@@ -1013,13 +1046,183 @@ async function applyCommand(c) {
   }
 }
 
+// ---------- Claude: «мозг», если указан ключ Claude (платно, без очередей бесплатного Gemini) ----------
+const CLAUDE_MODELS = [
+  ["claude-opus-5-5", "Claude Opus 5.5 - самая умная"],
+  ["claude-sonnet-5-5", "Claude Sonnet 5.5 - почти как Opus, примерно вдвое дешевле"],
+  ["claude-haiku-5-5", "Claude Haiku 5.5 - самая быстрая и дешёвая"]
+];
+let Anthropic = null;      // библиотека Anthropic, грузится при первом обращении к Claude
+let claudeClient = null, claudeClientKey = "";
+
+async function claude() {
+  if (!Anthropic) Anthropic = (await import("https://cdn.jsdelivr.net/npm/@anthropic-ai/sdk@1.3.0/+esm")).default;
+  if (!claudeClient || claudeClientKey !== claudeKey) {
+    // ключ хранится только на этом устройстве, запросы идут из браузера прямо в Anthropic
+    claudeClient = new Anthropic({ apiKey: claudeKey, dangerouslyAllowBrowser: true, maxRetries: 1, timeout: 45000 });
+    claudeClientKey = claudeKey;
+  }
+  return claudeClient;
+}
+
+// схема ответа в формате Gemini -> JSON Schema для Claude (у каждого объекта все поля обязательны)
+function toJsonSchema(g) {
+  const out = { type: g.type.toLowerCase() };
+  if (g.enum) out.enum = g.enum;
+  if (out.type === "object") {
+    out.properties = Object.fromEntries(Object.entries(g.properties).map(([k, v]) => [k, toJsonSchema(v)]));
+    out.required = Object.keys(g.properties);
+    out.additionalProperties = false;
+  }
+  if (out.type === "array") out.items = toJsonSchema(g.items);
+  return out;
+}
+
+function claudeError(e) {
+  const msg = (e && e.message) || "";
+  if (Anthropic && e instanceof Anthropic.AuthenticationError) return "Ключ Claude неверный - проверьте его в настройках.";
+  if (/credit balance/i.test(msg)) return "На счёте Claude закончились деньги - пополните баланс на console.anthropic.com.";
+  if (Anthropic && e instanceof Anthropic.PermissionDeniedError) return "У ключа Claude нет доступа к этой модели. [" + msg.slice(0, 150) + "]";
+  if (Anthropic && e instanceof Anthropic.RateLimitError) return "Слишком много запросов к Claude - подождите минуту.";
+  if (Anthropic && e instanceof Anthropic.InternalServerError) return "Серверы Claude перегружены - попробуйте через минуту.";
+  if (Anthropic && e instanceof Anthropic.APIConnectionError) return "Нет связи с Claude - проверьте интернет.";
+  return "Ошибка Claude. [" + msg.slice(0, 200) + "]";
+}
+
+// один запрос к Claude со строгим JSON-ответом по схеме
+async function askClaude(system, messages, schema) {
+  const params = {
+    model: claudeModel,
+    max_tokens: 16000,
+    system,
+    messages,
+    // разговор и маршрут не требуют долгих раздумий - отвечает быстрее
+    output_config: { effort: "low", format: { type: "json_schema", schema: toJsonSchema(schema) } }
+  };
+  let res;
+  try {
+    const client = await claude();
+    res = claudeModel === "claude-haiku-5-5"
+      ? await client.messages.create(params)
+      // если фильтр безопасности ошибочно откажет, Anthropic сам повторит запрос на подходящей модели
+      : await client.beta.messages.create({ ...params, betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" });
+  } catch (e) {
+    throw new Error(claudeError(e));
+  }
+  if (res.stop_reason === "refusal") throw new Error("Claude не стал отвечать на это - переформулируйте, пожалуйста.");
+  const text = res.content.filter(b => b.type === "text").map(b => b.text).join("");
+  return JSON.parse(text);
+}
+
+// склеиваем историю в чередование user/assistant, как требует Claude
+function claudeMessages(turns, now) {
+  const msgs = [];
+  for (const t of turns) {
+    const last = msgs[msgs.length - 1];
+    if (last && last.role === t.role) last.content += "\n" + t.content;
+    else msgs.push({ role: t.role, content: t.content });
+  }
+  if (msgs.length && msgs[0].role === "assistant") msgs.unshift({ role: "user", content: "(start)" });
+  const last = msgs[msgs.length - 1];
+  if (last && last.role === "user") last.content += "\n" + now;
+  else msgs.push({ role: "user", content: now });
+  return msgs;
+}
+
+// распознавание речи браузером (Claude не принимает аудио)
+const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recog = null;
+
+function startListening(lang, onText) {
+  stopSpeaking();
+  recog = new SpeechRec();
+  recog.lang = lang;
+  recog.continuous = true;
+  recog.interimResults = true;
+  let finalText = "", interim = "";
+  recog.onresult = e => {
+    interim = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      if (e.results[i].isFinal) finalText += e.results[i][0].transcript + " ";
+      else interim += e.results[i][0].transcript;
+    }
+    listeningText((finalText + interim).trim());
+  };
+  recog.onerror = e => {
+    if (e.error === "not-allowed" || e.error === "service-not-allowed") toast("Нет доступа к микрофону или распознаванию речи - разрешите их в настройках браузера.");
+  };
+  recog.onend = () => {
+    const text = (finalText + " " + interim).trim();
+    recog = null;
+    setMode(null);
+    if (text) onText(text);
+    else toast("Не расслышала - нажмите 🎙 и говорите чуть громче.");
+  };
+  try {
+    recog.start();
+  } catch {
+    recog = null;
+    toast("Не получилось включить распознавание речи.");
+    return;
+  }
+  setMode("listening", "слушает… нажмите ■, когда закончите");
+}
+
+function stopSpeaking() {
+  speechSynthesis.cancel();
+}
+
+function listeningText(text) {
+  $("heard").textContent = "«" + text + "»";
+}
+
+function askClaudeNav(parts) {
+  const text = "Контекст поездки: " + JSON.stringify(tripContext()) + "\n" + parts.map(p => p.text || "").join(" ");
+  return askClaude(SYSTEM, [{ role: "user", content: text }], SCHEMA);
+}
+
+// поиск места в интернете через Claude (веб-поиск Anthropic); вернёт {name, address, lat, lon} или null
+async function claudeFind(q) {
+  const tool = claudeModel === "claude-haiku-5-5"
+    ? { type: "web_search_20250305", name: "web_search", max_uses: 3 }
+    : { type: "web_search_20260209", name: "web_search", max_uses: 3 };
+  const messages = [{ role: "user", content: `Найди в интернете место в Алматы: "${q}". В конце ответа напиши одной строкой JSON без пояснений: {"name": "название", "address": "улица и номер дома в Алматы, по-русски", "lat": широта, "lon": долгота}. Если не нашёл - {"name": ""}.` }];
+  let res;
+  for (let i = 0; i < 3; i++) {
+    try {
+      const client = await claude();
+      res = await client.messages.create({ model: claudeModel, max_tokens: 16000, output_config: { effort: "low" }, tools: [tool], messages });
+    } catch (e) {
+      throw new Error("поиск Claude: " + claudeError(e));
+    }
+    // долгий поиск Claude ставит на паузу - продолжаем его
+    if (res.stop_reason !== "pause_turn") break;
+    messages.push({ role: "assistant", content: res.content });
+  }
+  if (res.stop_reason === "refusal") return null;
+  const text = res.content.filter(b => b.type === "text").map(b => b.text).join("");
+  const found = text.match(/\{[^{}]*"name"[^{}]*\}/g);
+  const g = found ? JSON.parse(found[found.length - 1]) : null;
+  return g && g.name ? g : null;
+}
+
+// поиск места в интернете: Claude, если есть его ключ, иначе (или если не нашёл) - Gemini
+async function webFind(q) {
+  let why = "";
+  if (claudeKey) {
+    const g = await claudeFind(q).catch(e => { why = e.message; return null; });
+    if (g || !apiKey) { if (!g && why) throw new Error(why); return g; }
+  }
+  return geminiFind(q);
+}
+
 async function handle(parts) {
-  if (!apiKey) { openSettings(); return; }
+  if (!apiKey && !claudeKey) { openSettings(); return; }
   setMode("thinking");
   try {
     // геолокацию и ответ Gemini ждём одновременно
     const located = getHere().catch(() => null);
-    const c = await askGemini(parts);
+    const c = claudeKey ? await askClaudeNav(parts) : await askGemini(parts);
     await located;
     await applyCommand(c);
   } catch (e) {
@@ -1113,9 +1316,16 @@ function unlockSpeech() {
 
 $("mic").onclick = () => {
   unlockSpeech();
-  if (!apiKey) { openSettings(); return; }
+  if (!apiKey && !claudeKey) { openSettings(); return; }
   if (document.body.classList.contains("thinking")) return;
-  if (rec.proc) stopRecording(); else startRecording();
+  if (rec.proc) { stopRecording(); return; }
+  if (recog) { recog.stop(); return; }
+  if (claudeKey) {
+    if (!SpeechRec) { toast("Этот браузер не распознаёт речь - напишите текстом (кнопка Aa) или откройте навигатор в Safari или Chrome."); return; }
+    startListening("ru-RU", text => handle([{ text: "Голосовая команда водителя: " + text }]));
+    return;
+  }
+  startRecording();
 };
 
 $("kbBtn").onclick = () => {
@@ -1149,47 +1359,61 @@ function renderPlaces() {
 
 function openSettings() {
   renderPlaces();
+  $("claudeKeyInput").value = claudeKey;
+  $("claudeKeyInfo").textContent = claudeKey ? `Сохранён ключ: ${claudeKey.slice(0, 10)}…${claudeKey.slice(-4)}, ${claudeKey.length} символов.` : "";
+  const sel = $("claudeModelSelect");
+  sel.innerHTML = "";
+  for (const [id, name] of CLAUDE_MODELS) sel.append(new Option(name, id));
+  sel.value = claudeModel;
   $("keyInput").value = apiKey;
   $("keyInfo").textContent = apiKey ? `Сохранён ключ: ${apiKey.slice(0, 6)}…${apiKey.slice(-4)}, ${apiKey.length} символов (у правильного ключа Google - 39).` : "";
   $("settings").showModal();
 }
 $("settingsBtn").onclick = openSettings;
-function shareLink(key) {
-  const hex = [...key].map(c => c.charCodeAt(0).toString(16).padStart(2, "0")).join("");
-  return location.origin + location.pathname + "#h=" + hex + keySum(key);
+function shareKeys() {
+  const g = $("keyInput").value.trim() || apiKey, c = $("claudeKeyInput").value.trim() || claudeKey;
+  return g || c ? { g: g || undefined, c: c || undefined, m: c ? ($("claudeModelSelect").value || claudeModel) : undefined } : null;
 }
+function shareLink() {
+  const text = JSON.stringify(shareKeys());
+  const hex = [...text].map(ch => ch.charCodeAt(0).toString(16).padStart(2, "0")).join("");
+  return location.origin + location.pathname + "#j=" + hex + keySum(text);
+}
+const CLAUDE_PAYS = " Внимание: с ключом Claude его поездки оплачиваются с Вашего счёта.";
 
 // QR-код: наводят камеру iPhone - ссылка открывается сразу в Safari, мимо мессенджеров
 $("qrBtn").onclick = () => {
-  const key = $("keyInput").value.trim() || apiKey;
-  if (!key) { $("shareInfo").textContent = "Сначала вставьте свой ключ выше."; return; }
+  if (!shareKeys()) { $("shareInfo").textContent = "Сначала вставьте свой ключ выше."; return; }
   try {
     const qr = qrcode(0, "M");
-    qr.addData(shareLink(key));
+    qr.addData(shareLink());
     qr.make();
     $("qrBox").innerHTML = qr.createSvgTag({ cellSize: 5, margin: 3, scalable: true });
     const svg = $("qrBox").querySelector("svg");
     svg.style.width = "220px";
     svg.style.height = "220px";
     svg.style.background = "#fff";
-    $("shareInfo").textContent = "Пусть наведёт камеру iPhone на этот код и нажмёт на появившуюся ссылку. Приложение откроется с Вашим ключом.";
+    $("shareInfo").textContent = "Пусть наведёт камеру iPhone на этот код и нажмёт на появившуюся ссылку. Приложение откроется с Вашим ключом." + (shareKeys().c ? CLAUDE_PAYS : "");
   } catch {
     $("shareInfo").textContent = "QR-код не получился - скопируйте ссылку кнопкой выше.";
   }
 };
 
 $("shareBtn").onclick = async () => {
-  const key = $("keyInput").value.trim() || apiKey;
-  if (!key) { $("shareInfo").textContent = "Сначала вставьте свой ключ выше."; return; }
-  const link = shareLink(key);
+  if (!shareKeys()) { $("shareInfo").textContent = "Сначала вставьте свой ключ выше."; return; }
+  const link = shareLink();
   try {
     await navigator.clipboard.writeText(link);
-    $("shareInfo").textContent = "Ссылка скопирована - отправьте её в мессенджере. Открыв её, человек сразу сможет пользоваться приложением.";
+    $("shareInfo").textContent = "Ссылка скопирована - отправьте её в мессенджере. Открыв её, человек сразу сможет пользоваться приложением." + (shareKeys().c ? CLAUDE_PAYS : "");
   } catch {
     $("shareInfo").textContent = link;
   }
 };
 $("saveBtn").onclick = () => {
+  claudeKey = $("claudeKeyInput").value.trim();
+  claudeModel = $("claudeModelSelect").value || claudeModel;
+  store.set("claude_key", claudeKey);
+  store.set("claude_model", claudeModel);
   apiKey = $("keyInput").value.trim();
   store.set("key", apiKey);
   $("settings").close();
@@ -1198,14 +1422,27 @@ $("saveBtn").onclick = () => {
 renderPanel();
 getHere().then(p => { map.setView(p, 14); drawAll(); }).catch(() => linkKey || note("Не вижу, где Вы. Разрешите геолокацию для этого сайта - или называйте старт голосом: «от Абая 10 до …».", true));
 if (trip?.dest) rebuild();
-if (!apiKey) openSettings();
-// ключ пришёл по ссылке - сразу проверяем, что Google его принимает
+if (!apiKey && !claudeKey) openSettings();
+// ключи пришли по ссылке - сразу проверяем, что их принимают
 if (linkKey && linkKey !== "ok") { note(linkKey, true); toast(linkKey); }
-if (linkKey === "ok") {
-  fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1", { headers: { "x-goog-api-key": apiKey } })
-    .then(async r => { const t = r.ok ? "Ключ из ссылки сохранён и работает ✓" : geminiError(r.status, await r.text()); note(t, !r.ok); toast(t); })
-    .catch(() => note("Не удалось проверить ключ - нет связи.", true));
-}
+if (linkKey === "ok") (async () => {
+  const out = [];
+  let bad = false;
+  if (claudeKey) {
+    try { await (await claude()).models.retrieve(claudeModel); out.push("ключ Claude работает ✓"); }
+    catch (e) { out.push(claudeError(e)); bad = true; }
+  }
+  if (apiKey) {
+    try {
+      const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1", { headers: { "x-goog-api-key": apiKey } });
+      out.push(r.ok ? "ключ Gemini работает ✓" : geminiError(r.status, await r.text()));
+      bad = bad || (!r.ok && !claudeKey);
+    } catch { out.push("ключ Gemini не удалось проверить - нет связи"); }
+  }
+  const t = "Ключи из ссылки сохранены: " + out.join("; ");
+  note(t, bad);
+  toast(t);
+})();
 </script>
 </body>
 </html>
